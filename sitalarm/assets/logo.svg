@@ -1,0 +1,22 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="64" y1="48" x2="448" y2="464" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F6FBFF" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#DBECFF" stop-opacity="0.92"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="172" y1="112" x2="348" y2="400" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#54A8FF"/>
+      <stop offset="1" stop-color="#2E5BFF"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="48" y="48" width="416" height="416" rx="120" fill="url(#bg)"/>
+  <rect x="52" y="52" width="408" height="408" rx="116" stroke="#E9F2FF" stroke-width="8"/>
+
+  <circle cx="256" cy="180" r="56" fill="url(#accent)"/>
+  <path d="M148 352C148 292.353 196.353 244 256 244C315.647 244 364 292.353 364 352V368H148V352Z" fill="url(#accent)"/>
+
+  <rect x="154" y="96" width="16" height="320" rx="8" fill="#9EC8FF" fill-opacity="0.55"/>
+  <rect x="342" y="96" width="16" height="320" rx="8" fill="#9EC8FF" fill-opacity="0.55"/>
+  <rect x="186" y="96" width="140" height="16" rx="8" fill="#9EC8FF" fill-opacity="0.55"/>
+</svg>
