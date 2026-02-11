@@ -27,8 +27,8 @@ class DashboardTab(QWidget):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 12)
-        layout.setSpacing(10)
+        layout.setContentsMargins(12, 10, 12, 8)
+        layout.setSpacing(8)
 
         self.status_label = QLabel("状态：未启动")
         self.status_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
@@ -36,10 +36,10 @@ class DashboardTab(QWidget):
 
         stats_box = QGroupBox("今日统计（分钟）")
         stats_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        stats_box.setMaximumHeight(120)
+        stats_box.setMaximumHeight(90)
         stats_layout = QGridLayout(stats_box)
-        stats_layout.setContentsMargins(12, 10, 12, 10)
-        stats_layout.setHorizontalSpacing(28)
+        stats_layout.setContentsMargins(10, 8, 10, 8)
+        stats_layout.setHorizontalSpacing(20)
         self.correct_label = QLabel("正确：0")
         self.incorrect_label = QLabel("错误：0")
         self.unknown_label = QLabel("未知：0")
@@ -58,11 +58,11 @@ class DashboardTab(QWidget):
         self.message_box = QTextEdit()
         self.message_box.setReadOnly(True)
         self.message_box.setPlaceholderText("提醒内容会显示在这里")
-        self.message_box.setFixedHeight(96)
+        self.message_box.setFixedHeight(80)
         layout.addWidget(self.message_box)
 
         button_row = QHBoxLayout()
-        button_row.setSpacing(12)
+        button_row.setSpacing(10)
         run_now_btn = QPushButton("立即检测")
         pause_btn = QPushButton("暂停")
         resume_btn = QPushButton("继续")
@@ -81,9 +81,12 @@ class DashboardTab(QWidget):
         self.status_label.setText(f"状态：{text}")
 
     def set_day_summary(self, summary: DaySummary) -> None:
-        self.correct_label.setText(f"正确：{summary.correct_minutes}")
-        self.incorrect_label.setText(f"错误：{summary.incorrect_minutes}")
-        self.unknown_label.setText(f"未知：{summary.unknown_minutes}")
+        correct_minutes = int(summary.correct_seconds // 60)
+        incorrect_minutes = int(summary.incorrect_seconds // 60)
+        unknown_minutes = int(summary.unknown_seconds // 60)
+        self.correct_label.setText(f"正确：{correct_minutes}")
+        self.incorrect_label.setText(f"错误：{incorrect_minutes}")
+        self.unknown_label.setText(f"未知：{unknown_minutes}")
 
     def set_last_event(self, payload: dict[str, object]) -> None:
         status = str(payload.get("status", "unknown"))
@@ -91,5 +94,18 @@ class DashboardTab(QWidget):
         at = str(payload.get("time", "--:--:--"))
         self.last_event_label.setText(f"最近检测：{at} | {status} | {reasons}")
 
+        # Always refresh the reminder area after each detection.
+        message = str(payload.get("message", "") or "")
+        if message:
+            self.set_current_message(message)
+        else:
+            # Clear when no message is provided.
+            self.set_current_message("")
+
+    def set_current_message(self, message: str) -> None:
+        """Show the latest reminder/status message (overwrite)."""
+        self.message_box.setPlainText(message.strip())
+
     def append_message(self, message: str) -> None:
+        """Backward compatible: append a line to the message box."""
         self.message_box.append(message)

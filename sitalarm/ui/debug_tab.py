@@ -6,10 +6,12 @@ from typing import Any
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -24,7 +26,23 @@ class DebugTab(QWidget):
         self._build_ui()
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setObjectName("PageScrollArea")
+        outer.addWidget(scroll)
+
+        content = QWidget()
+        content.setObjectName("PageContent")
+        scroll.setWidget(content)
+
+        root = QVBoxLayout(content)
+        root.setContentsMargins(18, 16, 18, 16)
 
         intro = QLabel("调试页支持实时画面与检测叠加，可直接观察头占比阈值是否合理。")
         intro.setWordWrap(True)
@@ -41,8 +59,8 @@ class DebugTab(QWidget):
         preview_layout = QVBoxLayout(preview_group)
         self.preview_label = QLabel("等待实时画面...")
         self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setMinimumSize(720, 400)
-        self.preview_label.setStyleSheet("border: 1px solid #cccccc; background: #111; color: #ddd;")
+        self.preview_label.setMinimumSize(560, 320)
+        self.preview_label.setStyleSheet("border: 1px solid rgba(148, 163, 184, 80); background: rgba(15, 23, 42, 200); color: #94a3b8; border-radius: 8px;")
         preview_layout.addWidget(self.preview_label)
         root.addWidget(preview_group)
 
@@ -53,8 +71,9 @@ class DebugTab(QWidget):
         self.detail_box = QTextEdit()
         self.detail_box.setReadOnly(True)
         self.detail_box.setPlaceholderText("指标详情会显示在这里")
-        self.detail_box.setMinimumHeight(220)
+        self.detail_box.setMinimumHeight(140)
         root.addWidget(self.detail_box)
+        root.addStretch(1)
 
     def update_debug_info(self, payload: dict[str, object]) -> None:
         debug_info = payload.get("debug_info", {})

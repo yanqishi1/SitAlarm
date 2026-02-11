@@ -13,9 +13,9 @@ from typing import Generator, Iterable
 @dataclass
 class DailyStatsRow:
     date: str
-    correct_minutes: int
-    incorrect_minutes: int
-    unknown_minutes: int
+    correct_seconds: int
+    incorrect_seconds: int
+    unknown_seconds: int
 
 
 class Storage:
@@ -56,13 +56,43 @@ class Storage:
 
                 CREATE TABLE IF NOT EXISTS daily_stats (
                     date TEXT PRIMARY KEY,
-                    correct_minutes INTEGER NOT NULL DEFAULT 0,
-                    incorrect_minutes INTEGER NOT NULL DEFAULT 0,
-                    unknown_minutes INTEGER NOT NULL DEFAULT 0,
+                    correct_seconds INTEGER NOT NULL DEFAULT 0,
+                    incorrect_seconds INTEGER NOT NULL DEFAULT 0,
+                    unknown_seconds INTEGER NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL
                 );
                 """
             )
+            # Migration: older versions used *_minutes columns. Keep them if they exist,
+            # but prefer *_seconds going forward.
+            self._migrate_daily_stats_minutes_to_seconds(conn)
+
+    @staticmethod
+    def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return any(str(row["name"]) == column for row in rows)
+
+    def _migrate_daily_stats_minutes_to_seconds(self, conn: sqlite3.Connection) -> None:
+        # If the legacy columns exist, copy minutes -> seconds once.
+        if not self._column_exists(conn, "daily_stats", "correct_minutes"):
+            return
+        if not self._column_exists(conn, "daily_stats", "correct_seconds"):
+            # In case daily_stats table was created by old code and lacks seconds columns.
+            conn.execute("ALTER TABLE daily_stats ADD COLUMN correct_seconds INTEGER NOT NULL DEFAULT 0")
+            conn.execute("ALTER TABLE daily_stats ADD COLUMN incorrect_seconds INTEGER NOT NULL DEFAULT 0")
+            conn.execute("ALTER TABLE daily_stats ADD COLUMN unknown_seconds INTEGER NOT NULL DEFAULT 0")
+
+        # Only migrate rows that haven't been migrated.
+        conn.execute(
+            """
+            UPDATE daily_stats
+            SET
+                correct_seconds = CASE WHEN correct_seconds = 0 THEN correct_minutes * 60 ELSE correct_seconds END,
+                incorrect_seconds = CASE WHEN incorrect_seconds = 0 THEN incorrect_minutes * 60 ELSE incorrect_seconds END,
+                unknown_seconds = CASE WHEN unknown_seconds = 0 THEN unknown_minutes * 60 ELSE unknown_seconds END
+            WHERE (correct_minutes != 0 OR incorrect_minutes != 0 OR unknown_minutes != 0)
+            """
+        )
 
     def list_tables(self) -> set[str]:
         with self._lock, self._connect() as conn:
@@ -134,12 +164,12 @@ class Storage:
         with self._lock, self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO daily_stats(date, correct_minutes, incorrect_minutes, unknown_minutes, updated_at)
+                INSERT INTO daily_stats(date, correct_seconds, incorrect_seconds, unknown_seconds, updated_at)
                 VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(date) DO UPDATE SET
-                    correct_minutes = correct_minutes + excluded.correct_minutes,
-                    incorrect_minutes = incorrect_minutes + excluded.incorrect_minutes,
-                    unknown_minutes = unknown_minutes + excluded.unknown_minutes,
+                    correct_seconds = correct_seconds + excluded.correct_seconds,
+                    incorrect_seconds = incorrect_seconds + excluded.incorrect_seconds,
+                    unknown_seconds = unknown_seconds + excluded.unknown_seconds,
                     updated_at = excluded.updated_at
                 """,
                 (day_key, correct_delta, incorrect_delta, unknown_delta, now),
@@ -156,7 +186,7 @@ class Storage:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT date, correct_minutes, incorrect_minutes, unknown_minutes
+                SELECT date, correct_seconds, incorrect_seconds, unknown_seconds
                 FROM daily_stats
                 WHERE date BETWEEN ? AND ?
                 ORDER BY date ASC
@@ -167,9 +197,9 @@ class Storage:
         by_date = {
             row["date"]: DailyStatsRow(
                 date=str(row["date"]),
-                correct_minutes=int(row["correct_minutes"]),
-                incorrect_minutes=int(row["incorrect_minutes"]),
-                unknown_minutes=int(row["unknown_minutes"]),
+                correct_seconds=int(row["correct_seconds"]),
+                incorrect_seconds=int(row["incorrect_seconds"]),
+                unknown_seconds=int(row["unknown_seconds"]),
             )
             for row in rows
         }
@@ -185,7 +215,7 @@ class Storage:
         with self._lock, self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT date, correct_minutes, incorrect_minutes, unknown_minutes
+                SELECT date, correct_seconds, incorrect_seconds, unknown_seconds
                 FROM daily_stats
                 WHERE date = ?
                 """,
@@ -195,7 +225,7 @@ class Storage:
             return None
         return DailyStatsRow(
             date=str(row["date"]),
-            correct_minutes=int(row["correct_minutes"]),
-            incorrect_minutes=int(row["incorrect_minutes"]),
-            unknown_minutes=int(row["unknown_minutes"]),
+            correct_seconds=int(row["correct_seconds"]),
+            incorrect_seconds=int(row["incorrect_seconds"]),
+            unknown_seconds=int(row["unknown_seconds"]),
         )

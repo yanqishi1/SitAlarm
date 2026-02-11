@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -36,12 +37,13 @@ class SitAlarmController(QObject):
 
     def __init__(self, storage: Storage, settings_service: SettingsService, stats_service: StatsService) -> None:
         super().__init__()
+        self._log = logging.getLogger(__name__)
         self.storage = storage
         self.settings_service = settings_service
         self.stats_service = stats_service
 
         self.settings = self.settings_service.load()
-        self.capture_service = CameraCaptureService()
+        self.capture_service = CameraCaptureService(camera_index=self.settings.camera_index)
         self.detector = HeadRatioPostureDetector(
             ratio_threshold=self._effective_head_ratio_threshold(self.settings.head_ratio_threshold)
         )
@@ -52,6 +54,7 @@ class SitAlarmController(QObject):
 
         self._paused = False
         self._screen_start = datetime.now()
+        self._last_posture_status: str | None = None
         self._required_calibration_samples = 2
         self._calibration_ratios: list[float] = []
 
@@ -64,6 +67,7 @@ class SitAlarmController(QObject):
         self._live_preview_timer.timeout.connect(self._push_live_debug_frame)
 
     def start(self) -> None:
+        self._log.info("Controller start. settings=%s", self.settings)
         self.apply_settings(self.settings)
         self._publish_stats()
         if self._is_calibrated():
@@ -73,11 +77,13 @@ class SitAlarmController(QObject):
             self._emit_calibration_required()
 
     def stop(self) -> None:
+        self._log.info("Controller stop.")
         self._timer.stop()
         self.stop_live_debug()
         self.state_changed.emit("已停止")
 
     def pause_detection(self) -> None:
+        self._log.info("Pause detection.")
         self._paused = True
         self._timer.stop()
         self.state_changed.emit("已暂停")
@@ -86,8 +92,9 @@ class SitAlarmController(QObject):
         if not self._ensure_calibrated_for_detection():
             return
 
+        self._log.info("Resume detection. interval_seconds=%s", self.settings.capture_interval_seconds)
         self._paused = False
-        self._timer.start(self.settings.capture_interval_minutes * 60 * 1000)
+        self._timer.start(self.settings.capture_interval_seconds * 1000)
         self.state_changed.emit("检测中")
 
     def start_live_debug(self) -> None:
@@ -95,18 +102,23 @@ class SitAlarmController(QObject):
             return
 
         try:
+            self._log.info("Start live preview. camera_index=%s", self._live_preview_service.camera_index)
             self._live_preview_service.start()
         except CaptureError as exc:
+            self._log.exception("Start live preview failed: %s", exc)
             self.error_occurred.emit(str(exc))
             return
 
         self._live_preview_timer.start()
 
     def stop_live_debug(self) -> None:
+        if self._live_preview_service.started:
+            self._log.info("Stop live preview.")
         self._live_preview_timer.stop()
         self._live_preview_service.stop()
 
     def update_settings(self, **changes: object) -> AppSettings:
+        self._log.info("Update settings: %s", changes)
         self.settings = self.settings_service.update(**changes)
         self.apply_settings(self.settings)
         return self.settings
@@ -114,7 +126,17 @@ class SitAlarmController(QObject):
     def apply_settings(self, settings: AppSettings) -> None:
         self.settings = settings
         self.reminder_policy = ReminderPolicy(settings.reminder_cooldown_minutes)
-        self.detector.ratio_threshold = self._effective_head_ratio_threshold(settings.head_ratio_threshold)
+        base = self._effective_head_ratio_threshold(settings.head_ratio_threshold)
+        multiplier = self._threshold_multiplier(settings.detection_mode)
+        self.detector.ratio_threshold = min(1.0, base * multiplier)
+        self._log.info(
+            "Applied detection threshold. base=%.4f mode=%s multiplier=%.2f effective=%.4f",
+            base,
+            settings.detection_mode,
+            multiplier,
+            self.detector.ratio_threshold,
+        )
+        self._apply_camera_index(settings.camera_index)
         cleanup_old_capture_dirs(self.capture_base_dir, settings.retention_days, datetime.now().date())
 
         self._timer.stop()
@@ -130,8 +152,24 @@ class SitAlarmController(QObject):
             )
             return
 
-        self._timer.start(settings.capture_interval_minutes * 60 * 1000)
+        self._timer.start(settings.capture_interval_seconds * 1000)
         self._emit_calibration_status(phase="ready", message="头占比阈值已完成校准。")
+
+    def _apply_camera_index(self, camera_index: int) -> None:
+        camera_index = int(camera_index)
+        if camera_index == self.capture_service.camera_index and camera_index == self._live_preview_service.camera_index:
+            return
+
+        # If live preview is running, restart to apply new camera.
+        was_live = self._live_preview_service.started
+        if was_live:
+            self.stop_live_debug()
+
+        self.capture_service.camera_index = camera_index
+        self._live_preview_service.camera_index = camera_index
+
+        if was_live:
+            self.start_live_debug()
 
     def run_detection_now(self) -> None:
         if self._paused:
@@ -144,13 +182,16 @@ class SitAlarmController(QObject):
         image_path = day_dir / f"{now.strftime('%H%M%S')}.jpg"
 
         try:
+            self._log.info("Detection start. image_path=%s camera_index=%s", image_path, self.capture_service.camera_index)
             frame = self._capture_frame_for_detection()
             self.capture_service.save_frame(frame, image_path)
         except CaptureError as exc:
+            self._log.exception("Detection capture/save failed: %s", exc)
             self.error_occurred.emit(str(exc))
             return
 
         result = self._detect_posture(frame)
+        self._log.info("Detection result. status=%s reasons=%s confidence=%s", result.status, list(result.reasons), result.confidence)
         self._emit_debug_info(now=now, image_path=image_path, frame=frame, result=result, source="scheduled")
         self._record_event(now, image_path, result)
         self._publish_stats()
@@ -258,7 +299,9 @@ class SitAlarmController(QObject):
         self.live_debug_frame_updated.emit(payload)
 
     def _detect_posture(self, frame: object) -> PostureResult:
-        ratio_result = self.detector.evaluate_frame(frame)
+        # Normalize brightness before head detection (helps in low-light / overexposed scenes).
+        frame_for_detection, brightness_info = self.capture_service.normalize_frame_brightness(frame)
+        ratio_result = self.detector.evaluate_frame(frame_for_detection)
 
         if ratio_result.status == "incorrect":
             reasons = ("head_too_close",)
@@ -270,6 +313,7 @@ class SitAlarmController(QObject):
             "threshold_head_ratio": round(self.detector.ratio_threshold, 4),
             "face_box": ratio_result.face_box,
             "calibrated": self._is_calibrated(),
+            **brightness_info,
         }
 
         return PostureResult(
@@ -290,13 +334,22 @@ class SitAlarmController(QObject):
         self.stats_service.record_detection(
             day=now.date(),
             status=result.status,
-            interval_minutes=self.settings.capture_interval_minutes,
+            interval_seconds=self.settings.capture_interval_seconds,
         )
+
+        # Build a "current message" for UI refresh on every detection.
+        if result.status == "incorrect":
+            ui_message = self.reminder_policy.build_message(result.reasons)
+        elif result.status == "correct":
+            ui_message = "坐姿正常，继续保持。"
+        else:
+            ui_message = "未识别到头部，请调整角度/光线后重试。"
 
         payload = {
             "time": now.strftime("%H:%M:%S"),
             "status": result.status,
             "reasons": ", ".join(result.reasons) if result.reasons else "-",
+            "message": ui_message,
             "image_path": str(image_path),
             "confidence": result.confidence,
         }
@@ -310,9 +363,21 @@ class SitAlarmController(QObject):
         self.history_updated.emit(history)
 
     def _trigger_reminders(self, now: datetime, result: PostureResult) -> None:
-        if result.status == "incorrect" and self.reminder_policy.should_notify(result.reasons, now):
-            message = self.reminder_policy.build_message(result.reasons)
-            self.reminder_triggered.emit(message)
+        # IMPORTANT:
+        # The dashboard always shows the latest status message per detection.
+        # Actual reminder (dim/popup) should trigger at least once when posture
+        # transitions into incorrect, even if cooldown would otherwise suppress it.
+        if result.status == "incorrect":
+            transitioned = self._last_posture_status != "incorrect"
+            due = transitioned or self.reminder_policy.should_notify(result.reasons, now)
+            if due:
+                message = self.reminder_policy.build_message(result.reasons)
+                self._log.info("Reminder triggered. transitioned=%s reasons=%s", transitioned, list(result.reasons))
+                self.reminder_triggered.emit(message)
+            else:
+                self._log.info("Reminder suppressed by cooldown. reasons=%s", list(result.reasons))
+
+        self._last_posture_status = result.status
 
         if not self.settings.screen_time_enabled:
             return
@@ -356,6 +421,15 @@ class SitAlarmController(QObject):
         if threshold > 0.0:
             return threshold
         return DEFAULT_HEAD_RATIO_THRESHOLD
+
+    @staticmethod
+    def _threshold_multiplier(mode: str) -> float:
+        mode = str(mode or "strict").lower().strip()
+        if mode == "normal":
+            return 1.1
+        if mode in ("loose", "宽松"):
+            return 1.2
+        return 1.0
 
     def _ensure_calibrated_for_detection(self) -> bool:
         if self._is_calibrated():

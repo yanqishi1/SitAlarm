@@ -1,25 +1,33 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from pathlib import Path
 
-from PyQt5.QtCore import Qt, QUrl
+from PyQt5.QtCore import QSize, Qt, QUrl
 from PyQt5.QtGui import QDesktopServices, QIcon
 from PyQt5.QtWidgets import (
     QAction,
+    QAbstractItemView,
+    QHBoxLayout,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
     QStyle,
     QSystemTrayIcon,
-    QTabWidget,
+    QStackedWidget,
+    QWidget,
 )
 
 from sitalarm.controller import SitAlarmController
 from sitalarm.services.stats_service import DaySummary
 from sitalarm.ui.dashboard_tab import DashboardTab
 from sitalarm.ui.debug_tab import DebugTab
+from sitalarm.ui.effects import install_hover_shadows
 from sitalarm.ui.reminder_toast import ReminderToast
+from sitalarm.ui.screen_dim_overlay import ScreenDimmer
 from sitalarm.ui.settings_tab import SettingsTab
 from sitalarm.ui.stats_tab import StatsTab
 
@@ -27,6 +35,7 @@ from sitalarm.ui.stats_tab import StatsTab
 class MainWindow(QMainWindow):
     def __init__(self, controller: SitAlarmController) -> None:
         super().__init__()
+        self._log = logging.getLogger(__name__)
         self.controller = controller
         self.today_summary = DaySummary(datetime.now().date(), 0, 0, 0)
         self._allow_close = False
@@ -34,31 +43,75 @@ class MainWindow(QMainWindow):
         self._calibration_prompted = False
 
         self.setWindowTitle("SitAlarm - 坐姿提醒")
-        self.resize(860, 540)
+        self.resize(720, 520)
+        self.setMinimumSize(620, 460)
         self.setObjectName("RootSurface")
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        # Enable semi-transparent window background for frosted glass effect
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
+        # Opaque window (no opacity setting)
+        self.setWindowOpacity(1.0)
 
         self._app_icon = self._load_app_icon()
         self._reminder_toast = ReminderToast()
+        self._screen_dimmer = ScreenDimmer()
 
-        self.tabs = QTabWidget()
         self.dashboard_tab = DashboardTab()
         self.stats_tab = StatsTab()
         self.debug_tab = DebugTab()
         self.settings_tab = SettingsTab()
 
-        self.tabs.addTab(self.dashboard_tab, "首页")
-        self.tabs.addTab(self.stats_tab, "统计")
-        self.tabs.addTab(self.debug_tab, "摄像头调试")
-        self.tabs.addTab(self.settings_tab, "设置")
-        self.setCentralWidget(self.tabs)
+        # Left sidebar navigation (icons centered, top-to-bottom)
+        container = QWidget()
+        container.setObjectName("MainContainer")
+        row = QHBoxLayout(container)
+        row.setContentsMargins(12, 12, 12, 12)
+        row.setSpacing(12)
+
+        self.side_nav = QListWidget()
+        self.side_nav.setObjectName("SideNav")
+        self.side_nav.setIconSize(QSize(22, 22))
+        self.side_nav.setMovement(QListWidget.Static)
+        self.side_nav.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.side_nav.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.side_nav.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.side_nav.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.side_nav.setFixedWidth(74)
+
+        self.pages = QStackedWidget()
+        self.pages.setObjectName("Pages")
+        self.pages.addWidget(self.dashboard_tab)
+        self.pages.addWidget(self.stats_tab)
+        self.pages.addWidget(self.debug_tab)
+        self.pages.addWidget(self.settings_tab)
+
+        style = self.style()
+        items = [
+            ("首页", style.standardIcon(QStyle.SP_ComputerIcon)),
+            ("统计", style.standardIcon(QStyle.SP_FileDialogDetailedView)),
+            ("摄像头调试", style.standardIcon(QStyle.SP_MediaPlay)),
+            ("设置", style.standardIcon(QStyle.SP_FileDialogContentsView)),
+        ]
+        for label, icon in items:
+            it = QListWidgetItem(icon, "")
+            it.setToolTip(label)
+            it.setTextAlignment(Qt.AlignCenter)
+            self.side_nav.addItem(it)
+
+        self.side_nav.setCurrentRow(0)
+
+        row.addWidget(self.side_nav, 0)
+        row.addWidget(self.pages, 1)
+        self.setCentralWidget(container)
+
+        # Hover shadows for buttons (glass floating effect)
+        install_hover_shadows(self)
 
         self._setup_tray()
         self._wire_events()
 
         self.settings_tab.load_settings(self.controller.settings)
         self.controller.start()
-        self._on_tab_changed(self.tabs.currentIndex())
+        self._on_nav_changed(self.side_nav.currentRow())
 
     def _wire_events(self) -> None:
         self.dashboard_tab.run_now_requested.connect(self.controller.run_detection_now)
@@ -70,6 +123,7 @@ class MainWindow(QMainWindow):
         self.settings_tab.open_capture_dir_requested.connect(self._open_capture_dir)
         self.settings_tab.calibration_capture_requested.connect(self.controller.capture_head_ratio_calibration_sample)
         self.settings_tab.calibration_reset_requested.connect(self.controller.reset_head_ratio_calibration)
+        self.settings_tab.preview_camera_requested.connect(self._open_debug_page)
 
         self.controller.state_changed.connect(self.dashboard_tab.set_state_text)
         self.controller.summary_updated.connect(self._update_day_summary)
@@ -82,7 +136,7 @@ class MainWindow(QMainWindow):
         self.controller.calibration_required.connect(self._show_calibration_required)
         self.controller.calibration_status_updated.connect(self.settings_tab.update_calibration_status)
 
-        self.tabs.currentChanged.connect(self._on_tab_changed)
+        self.side_nav.currentRowChanged.connect(self._on_nav_changed)
 
     def _setup_tray(self) -> None:
         self.tray_icon = QSystemTrayIcon(self)
@@ -133,6 +187,7 @@ class MainWindow(QMainWindow):
     def _save_settings(self, payload: dict) -> None:
         settings = self.controller.update_settings(**payload)
         self.settings_tab.load_settings(settings)
+        self.setWindowOpacity(1.0)
         self.statusBar().showMessage("设置已保存并生效", 3000)
 
     def _open_capture_dir(self) -> None:
@@ -149,16 +204,25 @@ class MainWindow(QMainWindow):
         self.stats_tab.update_statistics(history, self.today_summary)
 
     def _show_reminder(self, message: str) -> None:
-        self.dashboard_tab.append_message(message)
+        self._log.info("Show reminder. method=%s message=%s", getattr(self.controller.settings, "reminder_method", None), message)
+        # Keep the latest message visible even if user switches back later.
+        self.dashboard_tab.set_current_message(message)
         self.tray_icon.showMessage("SitAlarm 提醒", message, QSystemTrayIcon.Warning, 5000)
-        self._reminder_toast.show_message(message)
+        method = str(getattr(self.controller.settings, "reminder_method", "dim_screen") or "dim_screen")
+        if method == "popup":
+            self._reminder_toast.show_message(message)
+        else:
+            # Default: dim screen then restore (simulated by overlay) + popup,
+            # so users understand what happened.
+            self._screen_dimmer.flash(strength=0.55, duration_ms=1100)
+            self._reminder_toast.show_message(message, duration_ms=5000)
 
     def _show_error(self, message: str) -> None:
         self.statusBar().showMessage(message, 5000)
         self.tray_icon.showMessage("SitAlarm 错误", message, QSystemTrayIcon.Critical, 5000)
 
     def _show_calibration_required(self, message: str) -> None:
-        self.tabs.setCurrentWidget(self.settings_tab)
+        self._set_current_page(self.settings_tab)
         self.statusBar().showMessage(message, 6000)
 
         if self._calibration_prompted:
@@ -167,12 +231,23 @@ class MainWindow(QMainWindow):
         self._calibration_prompted = True
         QMessageBox.information(self, "SitAlarm 首次校准", message)
 
-    def _on_tab_changed(self, index: int) -> None:
-        current = self.tabs.widget(index)
+    def _on_nav_changed(self, index: int) -> None:
+        if index < 0 or index >= self.pages.count():
+            return
+        self.pages.setCurrentIndex(index)
+        current = self.pages.currentWidget()
         if current is self.debug_tab:
             self.controller.start_live_debug()
         else:
             self.controller.stop_live_debug()
+
+    def _open_debug_page(self) -> None:
+        self._set_current_page(self.debug_tab)
+
+    def _set_current_page(self, widget: QWidget) -> None:
+        idx = self.pages.indexOf(widget)
+        if idx >= 0:
+            self.side_nav.setCurrentRow(idx)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if self._allow_close:
@@ -187,6 +262,7 @@ class MainWindow(QMainWindow):
     def _quit(self) -> None:
         self.controller.stop()
         self._reminder_toast.hide()
+        self._screen_dimmer.hide()
         self.tray_icon.hide()
         self._allow_close = True
         self.close()

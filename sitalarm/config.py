@@ -9,12 +9,28 @@ APP_NAME = "SitAlarm"
 
 @dataclass(frozen=True)
 class AppSettings:
-    capture_interval_minutes: int = 5
+    # Detection interval in seconds (supports sub-minute scheduling).
+    # Note: older versions stored `capture_interval_minutes`; we migrate in SettingsService.
+    capture_interval_seconds: int = 300
+    # UI is opaque by default. (Kept for backward compatibility with older DB keys.)
+    ui_opacity: float = 1.0
+    # Camera index for OpenCV VideoCapture.
+    camera_index: int = 0
+    # Reminder method when posture is incorrect:
+    # - "dim_screen": dim via overlay and restore (default)
+    # - "popup": show popup/toast
+    reminder_method: str = "dim_screen"
+    # Cooldown policy (minutes). UI no longer exposes this knob.
     reminder_cooldown_minutes: int = 3
     screen_time_enabled: bool = False
     screen_time_threshold_minutes: int = 60
     retention_days: int = 7
     head_ratio_threshold: float = 0.0
+    # Detection strictness mode:
+    # - "strict": use threshold as-is
+    # - "normal": threshold * 1.1
+    # - "loose":  threshold * 1.2
+    detection_mode: str = "strict"
 
 
 DEFAULT_SETTINGS = AppSettings()

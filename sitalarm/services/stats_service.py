@@ -9,19 +9,20 @@ from sitalarm.services.storage import DailyStatsRow, Storage
 @dataclass(frozen=True)
 class DaySummary:
     day: date
-    correct_minutes: int
-    incorrect_minutes: int
-    unknown_minutes: int
+    correct_seconds: int
+    incorrect_seconds: int
+    unknown_seconds: int
 
 
 class StatsService:
     def __init__(self, storage: Storage) -> None:
         self.storage = storage
 
-    def record_detection(self, day: date, status: str, interval_minutes: int) -> None:
-        correct = interval_minutes if status == "correct" else 0
-        incorrect = interval_minutes if status == "incorrect" else 0
-        unknown = interval_minutes if status == "unknown" else 0
+    def record_detection(self, day: date, status: str, interval_seconds: int) -> None:
+        seconds = max(0, int(interval_seconds))
+        correct = seconds if status == "correct" else 0
+        incorrect = seconds if status == "incorrect" else 0
+        unknown = seconds if status == "unknown" else 0
         self.storage.increment_daily_stats(day, correct, incorrect, unknown)
 
     def get_day_summary(self, day: date) -> DaySummary:
@@ -36,7 +37,7 @@ class StatsService:
     def _row_to_summary(row: DailyStatsRow) -> DaySummary:
         return DaySummary(
             day=date.fromisoformat(row.date),
-            correct_minutes=row.correct_minutes,
-            incorrect_minutes=row.incorrect_minutes,
-            unknown_minutes=row.unknown_minutes,
+            correct_seconds=row.correct_seconds,
+            incorrect_seconds=row.incorrect_seconds,
+            unknown_seconds=row.unknown_seconds,
         )

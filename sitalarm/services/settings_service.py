@@ -13,6 +13,17 @@ class SettingsService:
     def load(self) -> AppSettings:
         data = asdict(DEFAULT_SETTINGS)
         stored = self.storage.all_settings()
+
+        # Backward compatibility: migrate old minutes-based interval to seconds.
+        # Older versions used `capture_interval_minutes`.
+        if "capture_interval_seconds" in data and "capture_interval_seconds" not in stored:
+            legacy_minutes = stored.get("capture_interval_minutes")
+            if legacy_minutes is not None:
+                try:
+                    data["capture_interval_seconds"] = max(1, int(legacy_minutes) * 60)
+                except ValueError:
+                    pass
+
         for key, value in stored.items():
             if key not in data:
                 continue
