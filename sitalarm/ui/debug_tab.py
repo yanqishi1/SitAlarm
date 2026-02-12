@@ -77,8 +77,9 @@ class DebugTab(QWidget):
         self.preview_label = QLabel("等待实时画面...")
         self.preview_label.setObjectName("PreviewLabel")
         self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setMinimumSize(680, 360)
-        preview_layout.addWidget(self.preview_label)
+        # 固定尺寸避免布局计算过程中的动态缩放
+        self.preview_label.setFixedSize(640, 480)
+        preview_layout.addWidget(self.preview_label, alignment=Qt.AlignCenter)
         root.addWidget(preview_group)
 
         info_group = QGroupBox("调试信息")
@@ -203,19 +204,23 @@ class DebugTab(QWidget):
 
     def _set_scaled_pixmap(self, pixmap: QPixmap) -> None:
         self._last_pixmap = pixmap
-        self._refresh_preview()
-
-    def resizeEvent(self, event) -> None:  # type: ignore[override]
-        super().resizeEvent(event)
-        self._refresh_preview()
+        # 使用固定尺寸缩放，避免布局变化导致的动态缩放
+        if self._last_pixmap is not None and not self._last_pixmap.isNull():
+            scaled = self._last_pixmap.scaled(
+                self.preview_label.size(),
+                Qt.KeepAspectRatio,
+                Qt.FastTransformation,  # 使用快速变换减少闪烁
+            )
+            self.preview_label.setPixmap(scaled)
 
     def _refresh_preview(self) -> None:
+        """刷新预览画面（保持固定尺寸避免动态缩放）"""
         if self._last_pixmap is None or self._last_pixmap.isNull():
             return
         scaled = self._last_pixmap.scaled(
             self.preview_label.size(),
             Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
+            Qt.FastTransformation,  # 使用快速变换减少闪烁
         )
         self.preview_label.setPixmap(scaled)
 

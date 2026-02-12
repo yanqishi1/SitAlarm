@@ -30,7 +30,7 @@ class AppSettings:
     # - "strict": use threshold as-is
     # - "normal": threshold * 1.1
     # - "loose":  threshold * 1.2
-    detection_mode: str = "strict"
+    detection_mode: str = "normal"
 
 
 DEFAULT_SETTINGS = AppSettings()

@@ -8,12 +8,20 @@ from PyQt5.QtWidgets import QApplication, QGraphicsOpacityEffect, QWidget
 
 class _DimOverlay(QWidget):
     def __init__(self) -> None:
-        # Use SplashScreen instead of Tool to improve "always on top" behavior on macOS,
-        # especially when the main window is hidden/minimized to tray.
-        super().__init__(None, Qt.FramelessWindowHint | Qt.SplashScreen | Qt.WindowStaysOnTopHint)
+        # Use SplashScreen with WindowDoesNotAcceptFocus to avoid interfering with other apps.
+        # This allows the dim overlay to show without stealing focus or blocking interactions.
+        super().__init__(
+            None,
+            Qt.FramelessWindowHint
+            | Qt.SplashScreen
+            | Qt.WindowStaysOnTopHint
+            | Qt.WindowDoesNotAcceptFocus,
+        )
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        # Ensure the overlay doesn't activate/focus
+        self.setFocusPolicy(Qt.NoFocus)
 
         self._alpha = 0.0
         self._opacity_effect = QGraphicsOpacityEffect(self)

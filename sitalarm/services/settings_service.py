@@ -49,3 +49,11 @@ class SettingsService:
         for key, value in payload.items():
             self.storage.set_setting(key, str(value))
         return normalized
+
+    def get_setting(self, key: str) -> str | None:
+        """获取指定 key 的设置值"""
+        return self.storage.get_setting(key)
+
+    def set_setting(self, key: str, value: str) -> None:
+        """设置指定 key 的设置值"""
+        self.storage.set_setting(key, value)

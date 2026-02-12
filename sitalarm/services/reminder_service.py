@@ -9,6 +9,7 @@ REMINDER_MESSAGES = {
     "shrugging": "检测到耸肩，请放松肩膀并缓慢下沉。",
     "head_too_close": "检测到你离屏幕过近，请向后坐并保持背部挺直。",
     "screen_time": "连续使用屏幕时间过长，请起身活动 1-2 分钟。",
+    "detection_failed": "检测坐姿失败（未识别到头部），请调整角度/光线后重试。",
 }
 
 

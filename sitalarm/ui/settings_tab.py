@@ -99,9 +99,9 @@ class SettingsTab(QWidget):
         form.setColumnStretch(1, 1)
 
         self.detection_mode = QComboBox()
-        self.detection_mode.addItem("strict (严格)", "strict")
-        self.detection_mode.addItem("normal (阈值x1.1)", "normal")
-        self.detection_mode.addItem("loose (阈值x1.2)", "loose")
+        self.detection_mode.addItem("strict(严格)", "strict")
+        self.detection_mode.addItem("normal(正常)", "normal")
+        self.detection_mode.addItem("loose(宽松)", "loose")
         self.detection_mode.setObjectName("WideInput")
         form.addWidget(self._field_label("检测模式"), 0, 0)
         form.addWidget(self.detection_mode, 0, 1)

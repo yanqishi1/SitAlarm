@@ -73,12 +73,12 @@ class MetricCard(QFrame):
 class BarChartWidget(QWidget):
     def __init__(self) -> None:
         super().__init__()
-        self._data: list[tuple[str, int]] = []
-        self._bars: list[tuple[QRectF, str, int]] = []
+        self._data: list[tuple[str, int, int]] = []
+        self._bars: list[tuple[QRectF, str, int, int, int]] = []
         self.setMinimumHeight(300)
         self.setMouseTracking(True)
 
-    def set_data(self, data: list[tuple[str, int]]) -> None:
+    def set_data(self, data: list[tuple[str, int, int]]) -> None:
         self._data = data
         self._bars.clear()
         self.update()
@@ -115,49 +115,74 @@ class BarChartWidget(QWidget):
             painter.drawText(chart_rect, Qt.AlignCenter, "暂无数据")
             return
 
-        max_value = max(max(value for _, value in self._data), 1)
+        max_total = max(max(correct + incorrect for _, correct, incorrect in self._data), 1)
         count = len(self._data)
         bar_space = chart_rect.width() / max(count, 1)
         bar_width = min(46.0, bar_space * 0.66)
 
         for i in range(5):
-            y_value = int(round(max_value * (4 - i) / 4))
+            y_value = int(round(max_total * (4 - i) / 4))
             y = chart_rect.top() + chart_rect.height() * i / 4
             painter.setPen(QColor(100, 116, 139, 180))
             painter.drawText(QRectF(0, y - 10, left_margin - 8, 20), Qt.AlignRight | Qt.AlignVCenter, str(y_value))
 
-        for idx, (label, value) in enumerate(self._data):
+        for idx, (label, correct, incorrect) in enumerate(self._data):
             x = chart_rect.left() + idx * bar_space + (bar_space - bar_width) / 2
-            ratio = value / max_value
-            h = chart_rect.height() * ratio
-            y = chart_rect.bottom() - h
+            total = correct + incorrect
+            total_height = chart_rect.height() * (total / max_total)
+            bar_top = chart_rect.bottom() - total_height
 
-            bar_rect = QRectF(x, y, bar_width, h)
-            self._bars.append((bar_rect, label, value))
+            correct_height = total_height * (correct / total) if total > 0 else 0.0
+            incorrect_height = total_height - correct_height
 
-            bar_gradient = QLinearGradient(bar_rect.topLeft(), bar_rect.bottomLeft())
-            bar_gradient.setColorAt(0.0, QColor(74, 144, 226, 240))
-            bar_gradient.setColorAt(1.0, QColor(43, 111, 199, 220))
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(bar_gradient)
-            painter.drawRoundedRect(bar_rect, 8, 8)
+            incorrect_rect = QRectF(x, bar_top, bar_width, incorrect_height)
+            correct_rect = QRectF(x, bar_top + incorrect_height, bar_width, correct_height)
+            total_rect = QRectF(x, bar_top, bar_width, total_height)
+            self._bars.append((total_rect, label, correct, incorrect, total))
+
+            # 正确时间 - 橙色 (用户要求：橙色=正确)
+            if correct_height > 0:
+                correct_gradient = QLinearGradient(correct_rect.topLeft(), correct_rect.bottomLeft())
+                correct_gradient.setColorAt(0.0, QColor(251, 146, 60, 240))  # 橙色
+                correct_gradient.setColorAt(1.0, QColor(234, 88, 12, 220))   # 深橙色
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(correct_gradient)
+                painter.drawRoundedRect(correct_rect, 8, 8)
+
+            # 错误时间 - 灰白色 (用户要求：灰白色=错误)
+            if incorrect_height > 0:
+                bad_gradient = QLinearGradient(incorrect_rect.topLeft(), incorrect_rect.bottomLeft())
+                bad_gradient.setColorAt(0.0, QColor(209, 213, 219, 240))  # 浅灰
+                bad_gradient.setColorAt(1.0, QColor(156, 163, 175, 220))  # 深灰
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(bad_gradient)
+                painter.drawRoundedRect(incorrect_rect, 8, 8)
 
             painter.setPen(QColor(71, 85, 105, 230))
             painter.drawText(QRectF(x - 8, chart_rect.bottom() + 6, bar_space + 16, 20), Qt.AlignCenter, label)
 
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
         hovered = None
-        for rect, label, value in self._bars:
+        for rect, label, correct, incorrect, total in self._bars:
             if rect.contains(event.pos()):
-                hovered = (label, value)
+                hovered = (label, correct, incorrect, total)
                 break
 
         if hovered is None:
             QToolTip.hideText()
             return
 
-        label, value = hovered
-        QToolTip.showText(event.globalPos(), f"{label}: {value} 分钟\n({_format_duration(value * 60)})", self)
+        label, correct, incorrect, total = hovered
+        QToolTip.showText(
+            event.globalPos(),
+            (
+                f"{label}\n"
+                f"正确时间: {correct} 分钟\n"
+                f"错误时间: {incorrect} 分钟\n"
+                f"总时间: {total} 分钟"
+            ),
+            self,
+        )
 
     def leaveEvent(self, event) -> None:  # type: ignore[override]
         QToolTip.hideText()
@@ -377,13 +402,13 @@ class StatsTab(QWidget):
         metric_grid.setVerticalSpacing(12)
 
         self.metric_screen_time = MetricCard("屏幕使用时间", "00:00:00", "◴", "warm")
+        self.metric_detection_time = MetricCard("今日检测时间", "00:00:00", "▶", "peach")
         self.metric_correct_time = MetricCard("正确坐姿时间", "00:00:00", "∿", "orange")
-        self.metric_start_time = MetricCard("开始检测时间", "-", "▶", "peach", "compact")
         self.metric_incorrect_time = MetricCard("错误坐姿时间", "00:00:00", "!", "red")
 
         metric_grid.addWidget(self.metric_screen_time, 0, 0)
-        metric_grid.addWidget(self.metric_correct_time, 0, 1)
-        metric_grid.addWidget(self.metric_start_time, 0, 2)
+        metric_grid.addWidget(self.metric_detection_time, 0, 1)
+        metric_grid.addWidget(self.metric_correct_time, 0, 2)
         metric_grid.addWidget(self.metric_incorrect_time, 0, 3)
         for col in range(4):
             metric_grid.setColumnStretch(col, 1)
@@ -399,9 +424,9 @@ class StatsTab(QWidget):
         bar_layout.setContentsMargins(16, 16, 16, 12)
         bar_layout.setSpacing(4)
 
-        bar_title = QLabel("近7天屏幕使用时长")
+        bar_title = QLabel("近7日正确/错误坐姿时长")
         bar_title.setObjectName("StatsSectionTitle")
-        bar_hint = QLabel("分钟 = 正确 + 错误")
+        bar_hint = QLabel("同一柱状条中：橙色=正确，灰白=错误（单位：分钟）")
         bar_hint.setObjectName("StatsSectionHint")
         self.bar_chart = BarChartWidget()
         bar_layout.addWidget(bar_title)
@@ -458,18 +483,26 @@ class StatsTab(QWidget):
         self,
         history: list[DaySummary],
         today_summary: DaySummary,
-        detection_start: datetime | None,
     ) -> None:
-        front_today = int(today_summary.correct_seconds + today_summary.incorrect_seconds)
-        self.metric_screen_time.set_value(_format_hhmmss(front_today))
-        self.metric_start_time.set_value(detection_start.strftime("%Y-%m-%d %H:%M:%S") if detection_start else "-")
+        # 屏幕使用时间：从系统读取
+        self.metric_screen_time.set_value(_format_hhmmss(int(getattr(today_summary, "screen_seconds", 0))))
+        
+        # 今日检测时间 = 正确时间 + 错误时间
+        detection_seconds = today_summary.correct_seconds + today_summary.incorrect_seconds
+        self.metric_detection_time.set_value(_format_hhmmss(detection_seconds))
+        
         self.metric_correct_time.set_value(_format_hhmmss(today_summary.correct_seconds))
         self.metric_incorrect_time.set_value(_format_hhmmss(today_summary.incorrect_seconds))
 
-        bar_data = []
+        bar_data: list[tuple[str, int, int]] = []
         for item in history:
-            front_seconds = item.correct_seconds + item.incorrect_seconds
-            bar_data.append((item.day.strftime("%m-%d"), int(front_seconds // 60)))
+            bar_data.append(
+                (
+                    item.day.strftime("%m-%d"),
+                    int(item.correct_seconds // 60),
+                    int(item.incorrect_seconds // 60),
+                )
+            )
         self.bar_chart.set_data(bar_data)
 
         pie_data = [

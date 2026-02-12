@@ -69,6 +69,12 @@ class Storage:
                     unknown_seconds INTEGER NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS screen_usage_stats (
+                    date TEXT PRIMARY KEY,
+                    screen_seconds INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             # Migration: older versions used *_minutes columns. Keep them if they exist,
@@ -259,6 +265,59 @@ class Storage:
                 )
             )
         return events
+
+
+    def increment_screen_usage(self, day: date, screen_delta: int) -> None:
+        seconds = max(0, int(screen_delta))
+        if seconds <= 0:
+            return
+        day_key = day.isoformat()
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO screen_usage_stats(date, screen_seconds, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(date) DO UPDATE SET
+                    screen_seconds = screen_seconds + excluded.screen_seconds,
+                    updated_at = excluded.updated_at
+                """,
+                (day_key, seconds, now),
+            )
+
+    def get_screen_usage_seconds(self, day: date) -> int:
+        day_key = day.isoformat()
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT screen_seconds FROM screen_usage_stats WHERE date = ?",
+                (day_key,),
+            ).fetchone()
+        if row is None:
+            return 0
+        return int(row["screen_seconds"])
+
+    def set_detection_start_if_missing(self, day: date, started_at: datetime) -> None:
+        key = f"detection_start:{day.isoformat()}"
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as conn:
+            existing = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+            if existing is not None:
+                return
+            conn.execute(
+                """
+                INSERT INTO settings(key, value, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                (key, started_at.isoformat(), now),
+            )
+
+    def get_detection_start(self, day: date) -> str | None:
+        key = f"detection_start:{day.isoformat()}"
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        if row is None:
+            return None
+        return str(row["value"])
 
     def get_first_posture_event_time(self, day: date) -> str | None:
         start = datetime.combine(day, datetime.min.time()).isoformat()

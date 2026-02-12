@@ -29,6 +29,7 @@ from sitalarm.services.stats_service import DaySummary
 from sitalarm.ui.dashboard_tab import DashboardTab
 from sitalarm.ui.debug_tab import DebugTab
 from sitalarm.ui.effects import install_hover_shadows
+from sitalarm.ui.onboarding_tab import OnboardingTab
 from sitalarm.ui.reminder_toast import ReminderToast
 from sitalarm.ui.screen_dim_overlay import ScreenDimmer
 from sitalarm.ui.settings_tab import SettingsTab
@@ -87,7 +88,6 @@ class MainWindow(QMainWindow):
         self.today_summary = DaySummary(datetime.now().date(), 0, 0, 0)
         self._allow_close = False
         self.last_history: list[DaySummary] = []
-        self.today_detection_start: datetime | None = None
         self.today_records: list[dict[str, str]] = []
         self._calibration_prompted = False
 
@@ -108,6 +108,7 @@ class MainWindow(QMainWindow):
         self.stats_tab = StatsTab()
         self.debug_tab = DebugTab()
         self.settings_tab = SettingsTab()
+        self.onboarding_tab = OnboardingTab()
 
         # Left sidebar navigation (icons centered, top-to-bottom)
         container = QWidget()
@@ -133,12 +134,14 @@ class MainWindow(QMainWindow):
 
         self.pages = QStackedWidget()
         self.pages.setObjectName("Pages")
+        self.pages.addWidget(self.onboarding_tab)
         self.pages.addWidget(self.dashboard_tab)
         self.pages.addWidget(self.stats_tab)
         self.pages.addWidget(self.debug_tab)
         self.pages.addWidget(self.settings_tab)
 
         items = [
+            ("引导", self._load_nav_icon("nav.png", QStyle.SP_DialogHelpButton)),
             ("首页", self._load_nav_icon("index.png", QStyle.SP_ComputerIcon)),
             ("统计", self._load_nav_icon("statistic.png", QStyle.SP_FileDialogDetailedView)),
             ("摄像头调试", self._load_nav_icon("video.png", QStyle.SP_MediaPlay)),
@@ -165,8 +168,12 @@ class MainWindow(QMainWindow):
         self._apply_initial_window_size()
 
         self.settings_tab.load_settings(self.controller.settings)
+        self.onboarding_tab.load_settings(self.controller.settings)
         self.controller.start()
         self._on_nav_changed(self.side_nav.currentRow())
+        
+        # 检查是否首次运行
+        self._check_first_run()
 
     def _wire_events(self) -> None:
         self.dashboard_tab.run_now_requested.connect(self.controller.run_detection_now)
@@ -180,10 +187,19 @@ class MainWindow(QMainWindow):
         self.settings_tab.calibration_reset_requested.connect(self.controller.reset_head_ratio_calibration)
         self.settings_tab.preview_camera_requested.connect(self._open_debug_page)
 
+        # Onboarding tab events
+        self.onboarding_tab.calibration_requested.connect(self._on_onboarding_calibration)
+        self.onboarding_tab.finish_onboarding_requested.connect(self._on_onboarding_finish)
+        self.onboarding_tab.start_detection_requested.connect(self._on_onboarding_start_detection)
+        self.onboarding_tab.settings_changed.connect(self._save_settings)
+        
+        # Connect controller signals to onboarding
+        self.controller.calibration_status_updated.connect(self._on_calibration_status_updated)
+        self.controller.live_debug_frame_updated.connect(self._on_live_frame_for_onboarding)
+
         self.controller.state_changed.connect(self.dashboard_tab.set_state_text)
         self.controller.summary_updated.connect(self._update_day_summary)
         self.controller.history_updated.connect(self._update_history)
-        self.controller.detection_start_updated.connect(self._update_detection_start)
         self.controller.posture_records_updated.connect(self._update_posture_records)
         self.controller.event_logged.connect(self.dashboard_tab.set_last_event)
         self.controller.reminder_triggered.connect(self._show_reminder)
@@ -262,16 +278,11 @@ class MainWindow(QMainWindow):
     def _update_day_summary(self, summary: DaySummary) -> None:
         self.today_summary = summary
         self.dashboard_tab.set_day_summary(summary)
-        self.stats_tab.update_statistics(self.last_history, summary, self.today_detection_start)
+        self.stats_tab.update_statistics(self.last_history, summary)
 
     def _update_history(self, history: list[DaySummary]) -> None:
         self.last_history = history
-        self.stats_tab.update_statistics(history, self.today_summary, self.today_detection_start)
-
-
-    def _update_detection_start(self, start_time: datetime | None) -> None:
-        self.today_detection_start = start_time
-        self.stats_tab.update_statistics(self.last_history, self.today_summary, start_time)
+        self.stats_tab.update_statistics(history, self.today_summary)
 
     def _update_posture_records(self, records: list[object]) -> None:
         normalized: list[dict[str, str]] = []
@@ -288,13 +299,34 @@ class MainWindow(QMainWindow):
         self.stats_tab.update_posture_records(normalized)
 
     def _show_reminder(self, message: str) -> None:
-        self._log.info("Show reminder. method=%s message=%s", getattr(self.controller.settings, "reminder_method", None), message)
+        self._log.info(
+            "Show reminder. method=%s message=%s",
+            getattr(self.controller.settings, "reminder_method", None),
+            message,
+        )
         # Keep the latest message visible even if user switches back later.
         self.dashboard_tab.set_current_message(message)
-        self.tray_icon.showMessage("SitAlarm 提醒", message, QSystemTrayIcon.Warning, 5000)
-        # In practice users expect both cues when posture is incorrect.
-        self._screen_dimmer.flash(strength=0.7, duration_ms=1800)
-        self._reminder_toast.show_message(message, duration_ms=5000)
+
+        # Check if this is a detection failure (unknown status)
+        is_detection_failure = "未识别到头部" in message or "检测坐姿失败" in message
+
+        # For detection failure: force main window to front with dim + popup
+        # For incorrect posture: just show toast and tray notification (no forced popup)
+        if is_detection_failure:
+            # Force main window to front
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+            
+            # Show dim overlay and popup for detection failure
+            self._screen_dimmer.flash(strength=0.5, duration_ms=2000)
+            self._reminder_toast.show_message(message, duration_ms=6000)
+            self.tray_icon.showMessage("SitAlarm 检测失败", message, QSystemTrayIcon.Warning, 6000)
+        else:
+            # For incorrect posture: lightweight reminder (no forced popup)
+            self.tray_icon.showMessage("SitAlarm 提醒", message, QSystemTrayIcon.Warning, 5000)
+            self._screen_dimmer.flash(strength=0.35, duration_ms=1200)
+            self._reminder_toast.show_message(message, duration_ms=5000)
 
     def _apply_initial_window_size(self) -> None:
         available = self.screen().availableGeometry() if self.screen() else None
@@ -326,7 +358,8 @@ class MainWindow(QMainWindow):
             return
         self.pages.setCurrentIndex(index)
         current = self.pages.currentWidget()
-        if current is self.debug_tab:
+        # 在调试页或引导页（步骤2预览时）启动实时预览
+        if current is self.debug_tab or current is self.onboarding_tab:
             self.controller.start_live_debug()
         else:
             self.controller.stop_live_debug()
@@ -338,6 +371,70 @@ class MainWindow(QMainWindow):
         idx = self.pages.indexOf(widget)
         if idx >= 0:
             self.side_nav.setCurrentRow(idx)
+
+    def _on_calibration_status_updated(self, payload: dict) -> None:
+        """处理校准状态更新"""
+        # 转发校准状态到设置页面
+        self.settings_tab.update_calibration_status(payload)
+        
+        # 更新引导页面的校准状态
+        phase = payload.get("phase", "")
+        captured = payload.get("captured", 0)
+        required = payload.get("required", 2)
+        message = payload.get("message", "")
+        
+        if phase in ("partial", "completed", "error"):
+            self.onboarding_tab.update_calibration_status(captured, required, message)
+
+    def _on_live_frame_for_onboarding(self, payload: dict) -> None:
+        """将实时帧转发到引导页面的预览"""
+        frame = payload.get("frame")
+        status = payload.get("status", "")
+        if frame is not None:
+            self.onboarding_tab.update_preview_frame(frame, status)
+
+    # Onboarding handlers
+    def _on_onboarding_calibration(self) -> None:
+        """引导页面请求拍摄校准照片"""
+        if not self.controller._is_calibrated():
+            self.controller.capture_head_ratio_calibration_sample()
+        else:
+            # 如果已经校准过了，提示用户是否重新校准
+            reply = QMessageBox.question(
+                self,
+                "重新校准",
+                "您已经完成过校准。是否要重新拍摄校准照片？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                self.controller.reset_head_ratio_calibration()
+                # 重置后自动拍摄第一张
+                self.controller.capture_head_ratio_calibration_sample()
+
+    def _on_onboarding_finish(self) -> None:
+        """引导完成"""
+        # 记录已完成引导
+        self.controller.settings_service.set_setting("onboarding_completed", "true")
+        # 跳转到首页
+        self._set_current_page(self.dashboard_tab)
+        self.statusBar().showMessage("引导完成！开始为您监测坐姿。", 5000)
+
+    def _on_onboarding_start_detection(self) -> None:
+        """引导页面请求开始检测"""
+        self._on_onboarding_finish()
+        if self.controller._is_calibrated():
+            self.controller.resume_detection()
+
+    def _check_first_run(self) -> None:
+        """检查是否首次运行，如果是则保持在引导页面，否则跳转到首页"""
+        completed = self.controller.settings_service.get_setting("onboarding_completed")
+        if completed != "true":
+            # 首次运行，保持在引导页面（第一个页面）
+            self.statusBar().showMessage("欢迎首次使用 SitAlarm！请完成引导设置。", 5000)
+        else:
+            # 非首次运行，自动跳转到首页
+            self._set_current_page(self.dashboard_tab)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if self._allow_close:
