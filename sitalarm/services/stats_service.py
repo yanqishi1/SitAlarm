@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 
-from sitalarm.services.storage import DailyStatsRow, Storage
+from sitalarm.services.storage import DailyStatsRow, PostureEventRow, Storage
 
 
 @dataclass(frozen=True)
@@ -12,6 +12,12 @@ class DaySummary:
     correct_seconds: int
     incorrect_seconds: int
     unknown_seconds: int
+
+
+@dataclass(frozen=True)
+class PostureRecord:
+    captured_at: datetime
+    status: str
 
 
 class StatsService:
@@ -33,6 +39,19 @@ class StatsService:
         rows = self.storage.list_daily_stats(days=days, today=today)
         return [self._row_to_summary(row) for row in rows]
 
+    def get_today_detection_start(self, day: date) -> datetime | None:
+        captured_at = self.storage.get_first_posture_event_time(day)
+        if not captured_at:
+            return None
+        try:
+            return datetime.fromisoformat(captured_at)
+        except ValueError:
+            return None
+
+    def get_posture_records(self, day: date, limit: int = 200) -> list[PostureRecord]:
+        rows = self.storage.list_posture_events(day=day, limit=limit)
+        return [self._row_to_record(row) for row in rows]
+
     @staticmethod
     def _row_to_summary(row: DailyStatsRow) -> DaySummary:
         return DaySummary(
@@ -41,3 +60,11 @@ class StatsService:
             incorrect_seconds=row.incorrect_seconds,
             unknown_seconds=row.unknown_seconds,
         )
+
+    @staticmethod
+    def _row_to_record(row: PostureEventRow) -> PostureRecord:
+        try:
+            captured_at = datetime.fromisoformat(row.captured_at)
+        except ValueError:
+            captured_at = datetime.min
+        return PostureRecord(captured_at=captured_at, status=row.status)

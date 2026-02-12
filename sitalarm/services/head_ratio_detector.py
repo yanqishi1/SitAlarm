@@ -22,42 +22,84 @@ class FaceDetector(Protocol):
         ...
 
 
-class HaarCascadeFaceDetector:
+class BlazeFaceFaceDetector:
+    """Face detector powered by MediaPipe's BlazeFace model."""
+
     def __init__(
         self,
-        scale_factor: float = 1.1,
-        min_neighbors: int = 5,
-        min_size: tuple[int, int] = (40, 40),
-        cascade_path: str | None = None,
+        model_selection: int = 0,
+        min_detection_confidence: float = 0.5,
     ) -> None:
-        self.scale_factor = scale_factor
-        self.min_neighbors = min_neighbors
-        self.min_size = min_size
+        try:
+            import mediapipe as mp  # type: ignore
+        except ImportError:
+            self._mp = None
+            self._detector = None
+            return
+
+        self._mp = mp
+        try:
+            self._detector = mp.solutions.face_detection.FaceDetection(
+                model_selection=model_selection,
+                min_detection_confidence=min_detection_confidence,
+            )
+        except Exception:
+            self._detector = None
+
+    def detect(self, frame: Any) -> list[FaceBox]:
+        if self._detector is None:
+            return []
+
+        frame_height, frame_width = frame.shape[:2]
+        if frame_width <= 0 or frame_height <= 0:
+            return []
 
         try:
             import cv2  # type: ignore
         except ImportError:
-            self._cv2 = None
-            self._detector = None
-            return
-
-        self._cv2 = cv2
-        path = cascade_path or (cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-        detector = cv2.CascadeClassifier(path)
-        self._detector = detector if not detector.empty() else None
-
-    def detect(self, frame: Any) -> list[FaceBox]:
-        if self._cv2 is None or self._detector is None:
             return []
 
-        gray = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2GRAY)
-        faces = self._detector.detectMultiScale(
-            gray,
-            scaleFactor=self.scale_factor,
-            minNeighbors=self.min_neighbors,
-            minSize=self.min_size,
-        )
-        return [tuple(int(value) for value in face) for face in faces]
+        infer_frame = frame
+        infer_width = frame_width
+        infer_height = frame_height
+        scale_x = 1.0
+        scale_y = 1.0
+
+        # Limit detector input size to reduce CPU usage on hi-res cameras.
+        max_infer_width = 640
+        if frame_width > max_infer_width:
+            infer_width = max_infer_width
+            infer_height = max(1, int(frame_height * (infer_width / frame_width)))
+            infer_frame = cv2.resize(frame, (infer_width, infer_height))
+            scale_x = frame_width / infer_width
+            scale_y = frame_height / infer_height
+
+        rgb = cv2.cvtColor(infer_frame, cv2.COLOR_BGR2RGB)
+        result = self._detector.process(rgb)
+        if not result.detections:
+            return []
+
+        boxes: list[FaceBox] = []
+        for detection in result.detections:
+            relative_box = detection.location_data.relative_bounding_box
+            x = int(relative_box.xmin * infer_width)
+            y = int(relative_box.ymin * infer_height)
+            w = int(relative_box.width * infer_width)
+            h = int(relative_box.height * infer_height)
+
+            x = int(x * scale_x)
+            y = int(y * scale_y)
+            w = int(w * scale_x)
+            h = int(h * scale_y)
+
+            x = max(0, min(x, frame_width - 1))
+            y = max(0, min(y, frame_height - 1))
+            w = max(0, min(w, frame_width - x))
+            h = max(0, min(h, frame_height - y))
+            if w > 0 and h > 0:
+                boxes.append((x, y, w, h))
+
+        return boxes
 
 
 class HeadRatioPostureDetector:
@@ -66,7 +108,7 @@ class HeadRatioPostureDetector:
         face_detector: FaceDetector | None = None,
         ratio_threshold: float = DEFAULT_HEAD_RATIO_THRESHOLD,
     ) -> None:
-        self.face_detector = face_detector or HaarCascadeFaceDetector()
+        self.face_detector = face_detector or BlazeFaceFaceDetector()
         self.ratio_threshold = ratio_threshold
 
     def evaluate_frame(self, frame: Any) -> HeadRatioResult:

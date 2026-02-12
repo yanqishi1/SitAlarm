@@ -19,7 +19,7 @@ from sitalarm.services.live_preview_service import LivePreviewService
 from sitalarm.services.posture_detector import PostureResult
 from sitalarm.services.reminder_service import ReminderPolicy
 from sitalarm.services.settings_service import SettingsService
-from sitalarm.services.stats_service import DaySummary, StatsService
+from sitalarm.services.stats_service import DaySummary, PostureRecord, StatsService
 from sitalarm.services.storage import Storage
 
 
@@ -27,6 +27,8 @@ class SitAlarmController(QObject):
     state_changed = pyqtSignal(str)
     summary_updated = pyqtSignal(object)
     history_updated = pyqtSignal(object)
+    detection_start_updated = pyqtSignal(object)
+    posture_records_updated = pyqtSignal(object)
     event_logged = pyqtSignal(object)
     reminder_triggered = pyqtSignal(str)
     error_occurred = pyqtSignal(str)
@@ -183,14 +185,15 @@ class SitAlarmController(QObject):
 
         try:
             self._log.info("Detection start. image_path=%s camera_index=%s", image_path, self.capture_service.camera_index)
-            frame = self._capture_frame_for_detection()
+            raw_frame = self._capture_frame_for_detection()
+            frame, brightness_info = self._prepare_frame_for_detection(raw_frame)
             self.capture_service.save_frame(frame, image_path)
         except CaptureError as exc:
             self._log.exception("Detection capture/save failed: %s", exc)
             self.error_occurred.emit(str(exc))
             return
 
-        result = self._detect_posture(frame)
+        result = self._detect_posture(frame, brightness_info=brightness_info)
         self._log.info("Detection result. status=%s reasons=%s confidence=%s", result.status, list(result.reasons), result.confidence)
         self._emit_debug_info(now=now, image_path=image_path, frame=frame, result=result, source="scheduled")
         self._record_event(now, image_path, result)
@@ -203,13 +206,14 @@ class SitAlarmController(QObject):
         image_path = day_dir / f"debug_{now.strftime('%H%M%S')}.jpg"
 
         try:
-            frame = self._capture_frame_for_detection()
+            raw_frame = self._capture_frame_for_detection()
+            frame, brightness_info = self._prepare_frame_for_detection(raw_frame)
             self.capture_service.save_frame(frame, image_path)
         except CaptureError as exc:
             self.error_occurred.emit(str(exc))
             return
 
-        result = self._detect_posture(frame)
+        result = self._detect_posture(frame, brightness_info=brightness_info)
         self._emit_debug_info(now=now, image_path=image_path, frame=frame, result=result, source="manual")
 
     def capture_head_ratio_calibration_sample(self) -> None:
@@ -219,7 +223,8 @@ class SitAlarmController(QObject):
         image_path = day_dir / f"calib_correct_{sample_index}_{now.strftime('%H%M%S')}.jpg"
 
         try:
-            frame = self._capture_frame_for_detection()
+            raw_frame = self._capture_frame_for_detection()
+            frame, _ = self._prepare_frame_for_detection(raw_frame)
             self.capture_service.save_frame(frame, image_path)
         except CaptureError as exc:
             self.error_occurred.emit(str(exc))
@@ -279,13 +284,14 @@ class SitAlarmController(QObject):
             return
 
         try:
-            frame = self._live_preview_service.read_frame()
+            raw_frame = self._live_preview_service.read_frame()
         except CaptureError as exc:
             self.stop_live_debug()
             self.error_occurred.emit(str(exc))
             return
 
-        result = self._detect_posture(frame)
+        frame, brightness_info = self._prepare_frame_for_detection(raw_frame)
+        result = self._detect_posture(frame, brightness_info=brightness_info)
         payload = {
             "time": datetime.now().strftime("%H:%M:%S"),
             "frame": frame,
@@ -298,10 +304,11 @@ class SitAlarmController(QObject):
         }
         self.live_debug_frame_updated.emit(payload)
 
-    def _detect_posture(self, frame: object) -> PostureResult:
-        # Normalize brightness before head detection (helps in low-light / overexposed scenes).
-        frame_for_detection, brightness_info = self.capture_service.normalize_frame_brightness(frame)
-        ratio_result = self.detector.evaluate_frame(frame_for_detection)
+    def _prepare_frame_for_detection(self, frame: object) -> tuple[object, dict[str, object]]:
+        return self.capture_service.normalize_frame_brightness(frame)
+
+    def _detect_posture(self, frame: object, brightness_info: dict[str, object] | None = None) -> PostureResult:
+        ratio_result = self.detector.evaluate_frame(frame)
 
         if ratio_result.status == "incorrect":
             reasons = ("head_too_close",)
@@ -313,7 +320,7 @@ class SitAlarmController(QObject):
             "threshold_head_ratio": round(self.detector.ratio_threshold, 4),
             "face_box": ratio_result.face_box,
             "calibrated": self._is_calibrated(),
-            **brightness_info,
+            **(brightness_info or {}),
         }
 
         return PostureResult(
@@ -359,8 +366,12 @@ class SitAlarmController(QObject):
         today = datetime.now().date()
         summary: DaySummary = self.stats_service.get_day_summary(today)
         history = self.stats_service.get_last_days(days=7, today=today)
+        detection_start = self.stats_service.get_today_detection_start(today)
+        records: list[PostureRecord] = self.stats_service.get_posture_records(today, limit=200)
         self.summary_updated.emit(summary)
         self.history_updated.emit(history)
+        self.detection_start_updated.emit(detection_start)
+        self.posture_records_updated.emit(records)
 
     def _trigger_reminders(self, now: datetime, result: PostureResult) -> None:
         # IMPORTANT:

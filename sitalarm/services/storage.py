@@ -18,6 +18,14 @@ class DailyStatsRow:
     unknown_seconds: int
 
 
+@dataclass
+class PostureEventRow:
+    captured_at: str
+    status: str
+    reasons: tuple[str, ...]
+    image_path: str
+    confidence: float | None
+
 class Storage:
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)
@@ -210,6 +218,66 @@ class Storage:
             result.append(by_date.get(key, DailyStatsRow(key, 0, 0, 0)))
             cursor = cursor.fromordinal(cursor.toordinal() + 1)
         return result
+
+    def list_posture_events(self, day: date | None = None, limit: int = 200) -> list[PostureEventRow]:
+        params: tuple[object, ...]
+        sql = (
+            "SELECT captured_at, status, reasons, image_path, confidence "
+            "FROM posture_events"
+        )
+        if day is not None:
+            start = datetime.combine(day, datetime.min.time()).isoformat()
+            end = datetime.combine(day, datetime.max.time()).isoformat()
+            sql += " WHERE captured_at BETWEEN ? AND ?"
+            params = (start, end)
+        else:
+            params = ()
+
+        sql += " ORDER BY captured_at DESC LIMIT ?"
+        params = (*params, max(1, int(limit)))
+
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+
+        events: list[PostureEventRow] = []
+        for row in rows:
+            reasons_raw = str(row["reasons"])
+            try:
+                parsed_reasons = json.loads(reasons_raw)
+                reasons = tuple(str(item) for item in parsed_reasons)
+            except Exception:
+                reasons = ()
+
+            confidence = row["confidence"]
+            events.append(
+                PostureEventRow(
+                    captured_at=str(row["captured_at"]),
+                    status=str(row["status"]),
+                    reasons=reasons,
+                    image_path=str(row["image_path"]),
+                    confidence=float(confidence) if confidence is not None else None,
+                )
+            )
+        return events
+
+    def get_first_posture_event_time(self, day: date) -> str | None:
+        start = datetime.combine(day, datetime.min.time()).isoformat()
+        end = datetime.combine(day, datetime.max.time()).isoformat()
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT captured_at
+                FROM posture_events
+                WHERE captured_at BETWEEN ? AND ?
+                ORDER BY captured_at ASC
+                LIMIT 1
+                """,
+                (start, end),
+            ).fetchone()
+
+        if row is None:
+            return None
+        return str(row["captured_at"])
 
     def _get_daily_stats_row(self, key: str) -> DailyStatsRow | None:
         with self._lock, self._connect() as conn:

@@ -205,7 +205,7 @@ class CameraCaptureService:
             return frame, info
 
     @staticmethod
-    def list_available_camera_indices(max_index: int = 8) -> list[int]:
+    def list_available_camera_indices(max_index: int = 8, stop_after_miss_streak: int = 2) -> list[int]:
         """Best-effort probe for available cameras (OpenCV indices)."""
         try:
             import cv2  # type: ignore
@@ -252,13 +252,21 @@ class CameraCaptureService:
             old_level = None
 
         available: list[int] = []
+        miss_streak = 0
+        max_miss = max(1, int(stop_after_miss_streak))
         try:
             with _silence_native_output():
                 for idx in range(max(0, int(max_index)) + 1):
                     cap = cv2.VideoCapture(idx)
                     try:
-                        if cap is not None and cap.isOpened():
+                        is_opened = bool(cap is not None and cap.isOpened())
+                        if is_opened:
                             available.append(idx)
+                            miss_streak = 0
+                        else:
+                            miss_streak += 1
+                            if available and miss_streak >= max_miss:
+                                break
                     finally:
                         try:
                             cap.release()

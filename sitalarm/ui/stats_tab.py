@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime
 
 from PyQt5.QtCore import QPointF, QRectF, Qt
-from PyQt5.QtGui import QColor, QPainter, QPen
+from PyQt5.QtGui import QColor, QLinearGradient, QPainter, QPen
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QFrame,
+    QGridLayout,
+    QHBoxLayout,
     QHeaderView,
     QLabel,
     QScrollArea,
@@ -38,12 +41,41 @@ def _format_hhmmss(seconds: int) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+class MetricCard(QFrame):
+    def __init__(self, title: str, value: str, icon: str, accent: str, value_style: str = "normal") -> None:
+        super().__init__()
+        self.setObjectName("StatsMetricCard")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(8)
+
+        icon_label = QLabel(icon)
+        icon_label.setObjectName("StatsMetricIcon")
+        icon_label.setProperty("accent", accent)
+        icon_label.setAlignment(Qt.AlignCenter)
+        icon_label.setFixedSize(54, 42)
+        layout.addWidget(icon_label, alignment=Qt.AlignLeft)
+
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("StatsMetricTitle")
+        layout.addWidget(self.title_label)
+
+        self.value_label = QLabel(value)
+        self.value_label.setObjectName("StatsMetricValue")
+        self.value_label.setProperty("accent", accent)
+        self.value_label.setProperty("valueStyle", value_style)
+        layout.addWidget(self.value_label)
+
+    def set_value(self, value: str) -> None:
+        self.value_label.setText(value)
+
+
 class BarChartWidget(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._data: list[tuple[str, int]] = []
         self._bars: list[tuple[QRectF, str, int]] = []
-        self.setMinimumHeight(160)
+        self.setMinimumHeight(300)
         self.setMouseTracking(True)
 
     def set_data(self, data: list[tuple[str, int]]) -> None:
@@ -57,23 +89,42 @@ class BarChartWidget(QWidget):
 
         width = self.width()
         height = self.height()
-        margin = 24
-        chart_rect = QRectF(margin, margin, width - margin * 2, height - margin * 2)
+        left_margin = 52
+        top_margin = 20
+        right_margin = 26
+        bottom_margin = 46
+        chart_rect = QRectF(
+            left_margin,
+            top_margin,
+            max(0.0, width - left_margin - right_margin),
+            max(0.0, height - top_margin - bottom_margin),
+        )
 
         self._bars.clear()
-        painter.setPen(QPen(QColor(15, 23, 42, 26), 1.2))
-        painter.setBrush(QColor(255, 255, 255, 140))
-        painter.drawRoundedRect(chart_rect, 10, 10)
+        if chart_rect.width() <= 0 or chart_rect.height() <= 0:
+            return
+
+        grid_color = QColor(148, 163, 184, 70)
+        painter.setPen(QPen(grid_color, 1, Qt.DashLine))
+        for i in range(5):
+            y = chart_rect.top() + chart_rect.height() * i / 4
+            painter.drawLine(chart_rect.left(), y, chart_rect.right(), y)
 
         if not self._data:
-            painter.setPen(QColor(15, 23, 42, 140))
+            painter.setPen(QColor(71, 85, 105, 190))
             painter.drawText(chart_rect, Qt.AlignCenter, "暂无数据")
             return
 
         max_value = max(max(value for _, value in self._data), 1)
         count = len(self._data)
-        bar_space = chart_rect.width() / count
-        bar_width = bar_space * 0.58
+        bar_space = chart_rect.width() / max(count, 1)
+        bar_width = min(46.0, bar_space * 0.66)
+
+        for i in range(5):
+            y_value = int(round(max_value * (4 - i) / 4))
+            y = chart_rect.top() + chart_rect.height() * i / 4
+            painter.setPen(QColor(100, 116, 139, 180))
+            painter.drawText(QRectF(0, y - 10, left_margin - 8, 20), Qt.AlignRight | Qt.AlignVCenter, str(y_value))
 
         for idx, (label, value) in enumerate(self._data):
             x = chart_rect.left() + idx * bar_space + (bar_space - bar_width) / 2
@@ -83,13 +134,16 @@ class BarChartWidget(QWidget):
 
             bar_rect = QRectF(x, y, bar_width, h)
             self._bars.append((bar_rect, label, value))
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(6, 182, 212, 200))
-            painter.drawRoundedRect(bar_rect, 6, 6)
 
-            painter.setPen(QColor(15, 23, 42, 180))
-            painter.drawText(QRectF(x - 6, chart_rect.bottom() + 2, bar_space + 12, 20), Qt.AlignCenter, label)
-            painter.drawText(QRectF(x - 4, max(chart_rect.top() - 4, y - 20), bar_width + 8, 18), Qt.AlignCenter, str(value))
+            bar_gradient = QLinearGradient(bar_rect.topLeft(), bar_rect.bottomLeft())
+            bar_gradient.setColorAt(0.0, QColor(74, 144, 226, 240))
+            bar_gradient.setColorAt(1.0, QColor(43, 111, 199, 220))
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(bar_gradient)
+            painter.drawRoundedRect(bar_rect, 8, 8)
+
+            painter.setPen(QColor(71, 85, 105, 230))
+            painter.drawText(QRectF(x - 8, chart_rect.bottom() + 6, bar_space + 16, 20), Qt.AlignCenter, label)
 
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
         hovered = None
@@ -103,7 +157,6 @@ class BarChartWidget(QWidget):
             return
 
         label, value = hovered
-        # value in minutes for bar chart
         QToolTip.showText(event.globalPos(), f"{label}: {value} 分钟\n({_format_duration(value * 60)})", self)
 
     def leaveEvent(self, event) -> None:  # type: ignore[override]
@@ -112,15 +165,17 @@ class BarChartWidget(QWidget):
 
 
 class PieChartWidget(QWidget):
-    COLORS = [QColor("#06b6d4"), QColor("#3b82f6"), QColor("#94a3b8")]
+    COLORS = [QColor("#fb923c"), QColor("#f97316"), QColor("#fed7aa")]
 
     def __init__(self) -> None:
         super().__init__()
         self._data: list[tuple[str, int]] = []
-        self._slice_regions: list[tuple[float, float, str, int]] = []
+        self._slice_regions: list[tuple[float, float, str, int, float, float]] = []
         self._pie_center = QPointF()
-        self._pie_radius = 0.0
-        self.setMinimumHeight(160)
+        self._outer_radius = 0.0
+        self._inner_radius = 0.0
+        self.setMinimumHeight(300)
+        self.setMinimumWidth(320)
         self.setMouseTracking(True)
 
     def set_data(self, data: list[tuple[str, int]]) -> None:
@@ -132,20 +187,24 @@ class PieChartWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        pie_size = min(self.width() * 0.52, self.height() - 20)
-        pie_size = max(120.0, pie_size)
-        pie_size = min(pie_size, min(self.width() - 32, self.height() - 20))
-        rect = QRectF(12, 10, pie_size, pie_size)
-
-        self._pie_center = rect.center()
-        self._pie_radius = rect.width() / 2
+        width = self.width()
+        height = self.height()
+        total = sum(value for _, value in self._data)
         self._slice_regions.clear()
 
-        total = sum(value for _, value in self._data)
         if total <= 0:
-            painter.setPen(QColor(15, 23, 42, 140))
+            painter.setPen(QColor(71, 85, 105, 190))
             painter.drawText(self.rect(), Qt.AlignCenter, "暂无占比数据")
             return
+
+        pie_size = min(width * 0.7, height * 0.56)
+        pie_size = max(150.0, pie_size)
+        pie_size = min(pie_size, min(width - 40.0, height - 90.0))
+        pie_rect = QRectF((width - pie_size) / 2, 14, pie_size, pie_size)
+
+        self._pie_center = pie_rect.center()
+        self._outer_radius = pie_rect.width() / 2
+        self._inner_radius = self._outer_radius * 0.52
 
         start_angle = 0.0
         for idx, (label, value) in enumerate(self._data):
@@ -153,39 +212,62 @@ class PieChartWidget(QWidget):
                 continue
 
             span = 360.0 * value / total
-            painter.setPen(QPen(QColor(15, 23, 42, 22), 1.2))
+            painter.setPen(QPen(QColor("#fffaf0"), 2))
             painter.setBrush(self.COLORS[idx % len(self.COLORS)])
-            painter.drawPie(rect, int(start_angle * 16), int(span * 16))
-            self._slice_regions.append((start_angle, start_angle + span, label, value))
+            painter.drawPie(pie_rect, int(start_angle * 16), int(span * 16))
+            self._slice_regions.append(
+                (start_angle, start_angle + span, label, value, self._inner_radius, self._outer_radius)
+            )
+
+            percentage = int(round(value * 100 / total))
+            if percentage >= 7:
+                mid_angle = start_angle + span / 2
+                rad = math.radians(mid_angle)
+                text_radius = self._outer_radius * 0.76
+                text_pos = QPointF(
+                    self._pie_center.x() + math.cos(rad) * text_radius,
+                    self._pie_center.y() - math.sin(rad) * text_radius,
+                )
+                painter.setPen(QColor("#fff7ed"))
+                painter.drawText(
+                    QRectF(text_pos.x() - 20, text_pos.y() - 10, 40, 20), Qt.AlignCenter, f"{percentage}%"
+                )
+
             start_angle += span
 
-        legend_x = rect.right() + 16
-        legend_y = 16
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#fff8ef"))
+        painter.drawEllipse(self._pie_center, self._inner_radius, self._inner_radius)
+
+        legend_top = pie_rect.bottom() + 16
+        item_height = 28
         for idx, (label, value) in enumerate(self._data):
-            painter.setPen(Qt.NoPen)
+            y = legend_top + idx * item_height
             painter.setBrush(self.COLORS[idx % len(self.COLORS)])
-            painter.drawRoundedRect(QRectF(legend_x, legend_y + idx * 26, 12, 12), 2, 2)
-            painter.setPen(QColor(15, 23, 42, 180))
-            painter.drawText(QPointF(legend_x + 18, legend_y + 10 + idx * 26), f"{label}: {_format_hhmmss(value)}")
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(QRectF(20, y, 12, 12))
+
+            painter.setPen(QColor(51, 65, 85, 235))
+            painter.drawText(QRectF(40, y - 2, width - 160, 16), Qt.AlignLeft | Qt.AlignVCenter, label)
+
+            painter.setPen(QColor(234, 88, 12, 240))
+            painter.drawText(QRectF(width - 130, y - 2, 110, 16), Qt.AlignRight | Qt.AlignVCenter, _format_hhmmss(value))
 
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
-        if self._pie_radius <= 0:
+        if self._outer_radius <= 0:
             QToolTip.hideText()
             return
 
         dx = event.pos().x() - self._pie_center.x()
         dy = event.pos().y() - self._pie_center.y()
         distance = math.hypot(dx, dy)
-
-        if distance > self._pie_radius:
+        if distance > self._outer_radius or distance < self._inner_radius:
             QToolTip.hideText()
             return
 
         angle = math.degrees(math.atan2(-dy, dx))
         angle = (angle + 360.0) % 360.0
-
-        # Qt drawPie 以 3 点钟方向为 0 度，逆时针增加，转换后保持一致。
-        for start, end, label, value in self._slice_regions:
+        for start, end, label, value, _, _ in self._slice_regions:
             if start <= angle < end:
                 QToolTip.showText(
                     event.globalPos(),
@@ -204,6 +286,9 @@ class PieChartWidget(QWidget):
 class StatsTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
+        self._build_ui()
+
+    def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -217,20 +302,147 @@ class StatsTab(QWidget):
 
         content = QWidget()
         content.setObjectName("PageContent")
+        content.setStyleSheet(
+            """
+            QWidget#PageContent { background: #fff8ef; }
+            QFrame#StatsMetricCard, QFrame#StatsSectionCard {
+                background: rgba(255, 255, 255, 238);
+                border: 1px solid rgba(251, 146, 60, 72);
+                border-radius: 18px;
+            }
+            QLabel#StatsPageTitle {
+                font-size: 30px;
+                font-weight: 900;
+                color: #ea580c;
+            }
+            QLabel#StatsPageSubtitle {
+                font-size: 16px;
+                font-weight: 700;
+                color: #334155;
+                margin-bottom: 4px;
+            }
+            QLabel#StatsMetricIcon {
+                font-size: 20px;
+                font-weight: 900;
+                border-radius: 12px;
+                color: white;
+            }
+            QLabel#StatsMetricIcon[accent='warm'] { background: #ff7b00; }
+            QLabel#StatsMetricIcon[accent='orange'] { background: #fb923c; }
+            QLabel#StatsMetricIcon[accent='red'] { background: #ef4444; }
+            QLabel#StatsMetricIcon[accent='peach'] { background: #f97316; }
+            QLabel#StatsMetricTitle {
+                font-size: 14px;
+                font-weight: 700;
+                color: #475569;
+            }
+            QLabel#StatsMetricValue {
+                font-size: 28px;
+                font-weight: 900;
+                letter-spacing: 1px;
+            }
+            QLabel#StatsMetricValue[valueStyle='compact'] {
+                font-size: 16px;
+            }
+            QLabel#StatsMetricValue[accent='warm'], QLabel#StatsMetricValue[accent='orange'] { color: #ea580c; }
+            QLabel#StatsMetricValue[accent='red'] { color: #ef4444; }
+            QLabel#StatsMetricValue[accent='peach'] { color: #f97316; }
+            QLabel#StatsSectionTitle {
+                font-size: 26px;
+                font-weight: 900;
+                color: #1e293b;
+            }
+            QLabel#StatsSectionHint {
+                font-size: 14px;
+                font-weight: 600;
+                color: #64748b;
+            }
+            """
+        )
         scroll.setWidget(content)
 
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setContentsMargins(16, 14, 16, 16)
+        layout.setSpacing(14)
 
-        layout.addWidget(QLabel("近 7 天在屏幕前时长（分钟，= 正确 + 错误）"))
+        title = QLabel("指标统计")
+        title.setObjectName("StatsPageTitle")
+        subtitle = QLabel("实时监控与数据分析")
+        subtitle.setObjectName("StatsPageSubtitle")
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        metric_grid = QGridLayout()
+        metric_grid.setHorizontalSpacing(14)
+        metric_grid.setVerticalSpacing(12)
+
+        self.metric_screen_time = MetricCard("屏幕使用时间", "00:00:00", "◴", "warm")
+        self.metric_correct_time = MetricCard("正确坐姿时间", "00:00:00", "∿", "orange")
+        self.metric_start_time = MetricCard("开始检测时间", "-", "▶", "peach", "compact")
+        self.metric_incorrect_time = MetricCard("错误坐姿时间", "00:00:00", "!", "red")
+
+        metric_grid.addWidget(self.metric_screen_time, 0, 0)
+        metric_grid.addWidget(self.metric_correct_time, 0, 1)
+        metric_grid.addWidget(self.metric_start_time, 0, 2)
+        metric_grid.addWidget(self.metric_incorrect_time, 0, 3)
+        for col in range(4):
+            metric_grid.setColumnStretch(col, 1)
+
+        layout.addLayout(metric_grid)
+
+        chart_row = QHBoxLayout()
+        chart_row.setSpacing(14)
+
+        bar_card = QFrame()
+        bar_card.setObjectName("StatsSectionCard")
+        bar_layout = QVBoxLayout(bar_card)
+        bar_layout.setContentsMargins(16, 16, 16, 12)
+        bar_layout.setSpacing(4)
+
+        bar_title = QLabel("近7天屏幕使用时长")
+        bar_title.setObjectName("StatsSectionTitle")
+        bar_hint = QLabel("分钟 = 正确 + 错误")
+        bar_hint.setObjectName("StatsSectionHint")
         self.bar_chart = BarChartWidget()
-        layout.addWidget(self.bar_chart)
+        bar_layout.addWidget(bar_title)
+        bar_layout.addWidget(bar_hint)
+        bar_layout.addWidget(self.bar_chart)
 
-        layout.addWidget(QLabel("今日状态占比（时长）"))
+        pie_card = QFrame()
+        pie_card.setObjectName("StatsSectionCard")
+        pie_layout = QVBoxLayout(pie_card)
+        pie_layout.setContentsMargins(16, 16, 16, 12)
+        pie_layout.setSpacing(4)
+
+        pie_title = QLabel("今日状态占比")
+        pie_title.setObjectName("StatsSectionTitle")
         self.pie_chart = PieChartWidget()
-        layout.addWidget(self.pie_chart)
+        pie_layout.addWidget(pie_title)
+        pie_layout.addWidget(self.pie_chart)
 
-        layout.addWidget(QLabel("每日明细（近 7 天）"))
+        chart_row.addWidget(bar_card, 3)
+        chart_row.addWidget(pie_card, 2)
+        layout.addLayout(chart_row)
+
+        table_title = QLabel("坐姿识别记录")
+        table_title.setObjectName("StatsSectionTitle")
+        layout.addWidget(table_title)
+
+        self.posture_table = QTableWidget(0, 2)
+        self.posture_table.setHorizontalHeaderLabels(["检测时间", "检测结果"])
+        self.posture_table.verticalHeader().setVisible(False)
+        self.posture_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.posture_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.posture_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.posture_table.setAlternatingRowColors(True)
+        self.posture_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.posture_table.setMinimumHeight(190)
+        layout.addWidget(self.posture_table)
+
+        daily_title = QLabel("每日明细（近7天）")
+        daily_title.setObjectName("StatsSectionTitle")
+        layout.addWidget(daily_title)
+
         self.daily_table = QTableWidget(0, 6)
         self.daily_table.setHorizontalHeaderLabels(["日期", "在屏幕前", "正确", "错误", "正确占比", "错误占比"])
         self.daily_table.verticalHeader().setVisible(False)
@@ -239,12 +451,21 @@ class StatsTab(QWidget):
         self.daily_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.daily_table.setAlternatingRowColors(True)
         self.daily_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.daily_table.setMinimumHeight(180)
+        self.daily_table.setMinimumHeight(220)
         layout.addWidget(self.daily_table)
-        layout.addStretch(1)
 
-    def update_statistics(self, history: list[DaySummary], today_summary: DaySummary) -> None:
-        # Bar chart uses minutes for readability.
+    def update_statistics(
+        self,
+        history: list[DaySummary],
+        today_summary: DaySummary,
+        detection_start: datetime | None,
+    ) -> None:
+        front_today = int(today_summary.correct_seconds + today_summary.incorrect_seconds)
+        self.metric_screen_time.set_value(_format_hhmmss(front_today))
+        self.metric_start_time.set_value(detection_start.strftime("%Y-%m-%d %H:%M:%S") if detection_start else "-")
+        self.metric_correct_time.set_value(_format_hhmmss(today_summary.correct_seconds))
+        self.metric_incorrect_time.set_value(_format_hhmmss(today_summary.incorrect_seconds))
+
         bar_data = []
         for item in history:
             front_seconds = item.correct_seconds + item.incorrect_seconds
@@ -258,7 +479,6 @@ class StatsTab(QWidget):
         ]
         self.pie_chart.set_data(pie_data)
 
-        # Daily breakdown table
         self.daily_table.setRowCount(len(history))
         for row_idx, item in enumerate(history):
             correct = int(item.correct_seconds)
@@ -277,7 +497,6 @@ class StatsTab(QWidget):
                 QTableWidgetItem(f"{incorrect_pct:.1f}%"),
             ]
 
-            # Extra info via tooltip (include unknown)
             unknown = int(item.unknown_seconds)
             tooltip = (
                 f"日期：{item.day.isoformat()}\n"
@@ -290,3 +509,15 @@ class StatsTab(QWidget):
                 cell.setToolTip(tooltip)
                 cell.setTextAlignment(Qt.AlignCenter)
                 self.daily_table.setItem(row_idx, col, cell)
+
+    def update_posture_records(self, records: list[dict[str, str]]) -> None:
+        self.posture_table.setRowCount(len(records))
+        for row_idx, row in enumerate(records):
+            captured_at = QTableWidgetItem(str(row.get("captured_at", "-")))
+            status = str(row.get("status", "unknown"))
+            status_text = {"correct": "正确", "incorrect": "错误", "unknown": "未知"}.get(status, status)
+            status_item = QTableWidgetItem(status_text)
+            captured_at.setTextAlignment(Qt.AlignCenter)
+            status_item.setTextAlignment(Qt.AlignCenter)
+            self.posture_table.setItem(row_idx, 0, captured_at)
+            self.posture_table.setItem(row_idx, 1, status_item)

@@ -12,7 +12,6 @@ from PyQt5.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -23,6 +22,7 @@ class DebugTab(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self._last_pixmap: QPixmap | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -42,37 +42,59 @@ class DebugTab(QWidget):
         scroll.setWidget(content)
 
         root = QVBoxLayout(content)
-        root.setContentsMargins(18, 16, 18, 16)
+        root.setContentsMargins(24, 24, 24, 24)
+        root.setSpacing(16)
 
-        intro = QLabel("调试页支持实时画面与检测叠加，可直接观察头占比阈值是否合理。")
+        title = QLabel("调试")
+        title.setObjectName("PageTitle")
+        root.addWidget(title)
+
+        intro_card = QFrame()
+        intro_card.setObjectName("UiCard")
+        intro_layout = QHBoxLayout(intro_card)
+        intro_layout.setContentsMargins(18, 14, 18, 14)
+        intro_layout.setSpacing(10)
+        info_icon = QLabel("i")
+        info_icon.setObjectName("InfoDot")
+        intro_layout.addWidget(info_icon, 0, Qt.AlignTop)
+        intro = QLabel("调试页支持实时画面与检测阈值，可直接观察头点比阈值是否合理。")
+        intro.setObjectName("SectionHint")
         intro.setWordWrap(True)
-        root.addWidget(intro)
+        intro_layout.addWidget(intro, 1)
+        root.addWidget(intro_card)
 
-        button_row = QHBoxLayout()
         self.debug_capture_btn = QPushButton("抓拍调试（保存图片）")
+        self.debug_capture_btn.setObjectName("ActionButton")
         self.debug_capture_btn.clicked.connect(self.debug_capture_requested.emit)
-        button_row.addWidget(self.debug_capture_btn)
-        button_row.addStretch()
-        root.addLayout(button_row)
+        root.addWidget(self.debug_capture_btn, alignment=Qt.AlignLeft)
 
-        preview_group = QGroupBox("实时调试画面")
+        preview_group = QGroupBox("实时测试画面")
+        preview_group.setObjectName("UiCard")
         preview_layout = QVBoxLayout(preview_group)
+        preview_layout.setContentsMargins(18, 18, 18, 18)
+        preview_layout.setSpacing(12)
+
         self.preview_label = QLabel("等待实时画面...")
+        self.preview_label.setObjectName("PreviewLabel")
         self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setMinimumSize(560, 320)
-        self.preview_label.setStyleSheet("border: 1px solid rgba(148, 163, 184, 80); background: rgba(15, 23, 42, 200); color: #94a3b8; border-radius: 8px;")
+        self.preview_label.setMinimumSize(680, 360)
         preview_layout.addWidget(self.preview_label)
         root.addWidget(preview_group)
 
-        self.summary_label = QLabel("等待调试数据...")
-        self.summary_label.setWordWrap(True)
-        root.addWidget(self.summary_label)
+        info_group = QGroupBox("调试信息")
+        info_group.setObjectName("UiCard")
+        info_layout = QHBoxLayout(info_group)
+        info_layout.setContentsMargins(24, 20, 24, 22)
+        info_layout.setSpacing(34)
 
-        self.detail_box = QTextEdit()
-        self.detail_box.setReadOnly(True)
-        self.detail_box.setPlaceholderText("指标详情会显示在这里")
-        self.detail_box.setMinimumHeight(140)
-        root.addWidget(self.detail_box)
+        self.left_info = QLabel("时间: -\n来源: -\n判定: -\n头点比: -\n原因: -")
+        self.right_info = QLabel("亮度: -\n头点比较准比: -\n状态: -\n实际比: -")
+        self.left_info.setObjectName("DebugInfoBlock")
+        self.right_info.setObjectName("DebugInfoBlock")
+        info_layout.addWidget(self.left_info, 1)
+        info_layout.addWidget(self.right_info, 1)
+        root.addWidget(info_group)
+
         root.addStretch(1)
 
     def update_debug_info(self, payload: dict[str, object]) -> None:
@@ -89,70 +111,53 @@ class DebugTab(QWidget):
         else:
             self._set_preview_from_path(str(payload.get("image_path", "")))
 
-        reasons = payload.get("reasons", [])
-        reason_text = ", ".join(reasons) if isinstance(reasons, list) and reasons else "无"
         source = str(payload.get("source", "unknown"))
         brightness = payload.get("brightness", "-")
         ratio = debug_info.get("head_ratio")
         ratio_text = f"{ratio:.4f}" if isinstance(ratio, (int, float)) else "-"
 
-        self.summary_label.setText(
-            f"时间：{payload.get('time', '-')}, 来源：{source}, 判定：{status}, "
-            f"头占比：{ratio_text}, 原因：{reason_text}, 亮度：{brightness}"
+        threshold = debug_info.get("threshold_head_ratio")
+        threshold_text = f"{threshold:.4f}" if isinstance(threshold, (int, float)) else "-"
+
+        reason_text = self._reason_text(payload.get("reasons"))
+        compare_text = f"{ratio_text} {'>=' if self._is_hit(ratio, threshold) else '<'} {threshold_text}"
+
+        status_text = "正常"
+        if status == "incorrect":
+            status_text = "错误"
+        elif status == "unknown":
+            status_text = "未知"
+
+        face_text = str(face_box) if isinstance(face_box, tuple) else "-"
+
+        self.left_info.setText(
+            f"时间: {payload.get('time', '-')}\n"
+            f"来源: {source}\n"
+            f"判定: {status}\n"
+            f"头点比: {ratio_text}\n"
+            f"原因: {reason_text}"
         )
 
-        lines: list[str] = []
-        self._append_metric(
-            lines,
-            "头占比指标",
-            debug_info.get("head_ratio"),
-            debug_info.get("threshold_head_ratio"),
+        self.right_info.setText(
+            f"亮度: {brightness}\n"
+            f"头点比较准比: {compare_text}\n"
+            f"状态: {status_text}\n"
+            f"实际比: {face_text}"
         )
 
-        if face_box is not None:
-            lines.append(f"头部框: {face_box}")
+    @staticmethod
+    def _reason_text(reasons: object) -> str:
+        if isinstance(reasons, list) and reasons:
+            return ", ".join(str(item) for item in reasons)
+        if isinstance(reasons, str) and reasons:
+            return reasons
+        return "无"
 
-        self._append_metric(
-            lines,
-            "上半身可见度",
-            debug_info.get("upper_visibility"),
-            debug_info.get("threshold_visibility"),
-        )
-        self._append_metric(
-            lines,
-            "头前倾指标",
-            debug_info.get("head_forward_ratio"),
-            debug_info.get("threshold_head_forward"),
-        )
-        self._append_metric(
-            lines,
-            "耸肩指标",
-            debug_info.get("shoulder_raise_ratio"),
-            debug_info.get("threshold_shrugging"),
-        )
-        self._append_metric(
-            lines,
-            "躯干前倾角",
-            debug_info.get("trunk_lean_degrees"),
-            debug_info.get("threshold_hunchback"),
-        )
-
-        hip_visibility = debug_info.get("hip_visibility")
-        if hip_visibility is not None:
-            lines.append(f"髋部可见度: {hip_visibility}")
-
-        trunk_available = debug_info.get("trunk_available")
-        if trunk_available is not None:
-            lines.append(f"躯干指标是否可用: {trunk_available}")
-
-        calibrated = debug_info.get("calibrated")
-        if calibrated is not None:
-            lines.append(f"是否已校准: {calibrated}")
-
-        if not lines:
-            lines.append("暂无可用调试指标")
-
-        self.detail_box.setPlainText("\n".join(lines))
+    @staticmethod
+    def _is_hit(value: object, threshold: object) -> bool:
+        if not isinstance(value, (int, float)) or not isinstance(threshold, (int, float)):
+            return False
+        return float(value) >= float(threshold)
 
     def _set_preview_from_path(self, image_path: str) -> None:
         if image_path and Path(image_path).exists():
@@ -161,6 +166,7 @@ class DebugTab(QWidget):
                 self._set_scaled_pixmap(pixmap)
                 return
 
+        self._last_pixmap = None
         self.preview_label.setPixmap(QPixmap())
         self.preview_label.setText("暂无调试画面")
 
@@ -196,7 +202,17 @@ class DebugTab(QWidget):
         self._set_scaled_pixmap(pixmap)
 
     def _set_scaled_pixmap(self, pixmap: QPixmap) -> None:
-        scaled = pixmap.scaled(
+        self._last_pixmap = pixmap
+        self._refresh_preview()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._refresh_preview()
+
+    def _refresh_preview(self) -> None:
+        if self._last_pixmap is None or self._last_pixmap.isNull():
+            return
+        scaled = self._last_pixmap.scaled(
             self.preview_label.size(),
             Qt.KeepAspectRatio,
             Qt.SmoothTransformation,
@@ -206,16 +222,7 @@ class DebugTab(QWidget):
     @staticmethod
     def _status_color(status: str) -> QColor:
         if status == "incorrect":
-            return QColor("#ff5252")
+            return QColor("#ff3d3d")
         if status == "correct":
-            return QColor("#00c853")
-        return QColor("#9e9e9e")
-
-    @staticmethod
-    def _append_metric(lines: list[str], name: str, value: object, threshold: object) -> None:
-        if not isinstance(value, (int, float)) or not isinstance(threshold, (int, float)):
-            return
-
-        hit = value >= threshold
-        flag = "触发" if hit else "正常"
-        lines.append(f"{name}: {value:.4f} >= {threshold:.4f} -> {flag}")
+            return QColor("#ff8a00")
+        return QColor("#9ca3af")
