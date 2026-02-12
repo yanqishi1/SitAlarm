@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 from dataclasses import asdict
@@ -9,6 +9,7 @@ from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
 from sitalarm.config import AppSettings, get_capture_base_dir
 from sitalarm.services.capture_service import CameraCaptureService, CaptureError
+from sitalarm.services.compute_device_service import effective_compute_device, gpu_available
 from sitalarm.services.file_service import cleanup_old_capture_dirs, ensure_day_capture_dir
 from sitalarm.services.head_ratio_detector import (
     CALIBRATION_SAFETY_MARGIN,
@@ -48,9 +49,20 @@ class SitAlarmController(QObject):
         self.stats_service = stats_service
 
         self.settings = self.settings_service.load()
+        self._gpu_available = gpu_available()
+        self._gpu_delegate_warned = False
         self.capture_service = CameraCaptureService(camera_index=self.settings.camera_index)
+        self._compute_device = effective_compute_device(getattr(self.settings, "compute_device", "cpu"))
+        try:
+            import cv2  # type: ignore
+
+            if hasattr(cv2, "ocl") and cv2.ocl.haveOpenCL():
+                cv2.ocl.setUseOpenCL(self._compute_device == "gpu")
+        except Exception:
+            pass
         self.detector = HeadRatioPostureDetector(
-            ratio_threshold=self._effective_head_ratio_threshold(self.settings.head_ratio_threshold)
+            ratio_threshold=self._effective_head_ratio_threshold(self.settings.head_ratio_threshold),
+            compute_device=self._compute_device,
         )
         self.reminder_policy = ReminderPolicy(self.settings.reminder_cooldown_minutes)
 
@@ -139,19 +151,67 @@ class SitAlarmController(QObject):
     def apply_settings(self, settings: AppSettings) -> None:
         self.settings = settings
         self.reminder_policy = ReminderPolicy(settings.reminder_cooldown_minutes)
+
+        previous_compute_device = getattr(self, "_compute_device", "cpu")
+        requested_compute_device = getattr(settings, "compute_device", "cpu")
+        self._compute_device = effective_compute_device(requested_compute_device)
+        # Enable/disable OpenCV OpenCL. This makes the UMat path actually use GPU when available.
+        try:
+            import cv2  # type: ignore
+
+            if hasattr(cv2, "ocl") and cv2.ocl.haveOpenCL():
+                cv2.ocl.setUseOpenCL(self._compute_device == "gpu")
+        except Exception:
+            pass
+
+        self.detector = HeadRatioPostureDetector(
+            ratio_threshold=self.detector.ratio_threshold,
+            pose_visibility_threshold=self.detector.pose_visibility_threshold,
+            hip_visibility_threshold=self.detector.hip_visibility_threshold,
+            head_forward_threshold=self.detector.head_forward_threshold,
+            hunchback_threshold_degrees=self.detector.hunchback_threshold_degrees,
+            ear_span_too_close_threshold=self.detector.ear_span_too_close_threshold,
+            compute_device=self._compute_device,
+        )
+
         base = self._effective_head_ratio_threshold(settings.head_ratio_threshold)
         multiplier = self._threshold_multiplier(settings.detection_mode)
         self.detector.ratio_threshold = min(1.0, base * multiplier)
         self.detector.head_forward_threshold = min(1.0, DEFAULT_HEAD_FORWARD_THRESHOLD * multiplier)
         self.detector.hunchback_threshold_degrees = min(45.0, DEFAULT_HUNCHBACK_THRESHOLD_DEGREES * multiplier)
+        backend_details = self.detector.backend_details()
+        if str(requested_compute_device).lower() == "gpu":
+            pose_backend = str(backend_details.get("pose_backend") or "")
+            face_backend = str(backend_details.get("face_backend") or "")
+            if pose_backend == "tasks:gpu" and face_backend == "tasks:gpu":
+                self._gpu_delegate_warned = False
+            elif not self._gpu_delegate_warned:
+                self._gpu_delegate_warned = True
+                pose_err = backend_details.get("pose_gpu_init_error")
+                face_err = None
+                face_details = backend_details.get("face_details")
+                if isinstance(face_details, dict):
+                    face_err = face_details.get("gpu_init_error")
+                message = "已尝试启用 GPU 加速，但 MediaPipe GPU Delegate 初始化失败/不支持，已自动回退到 CPU。"
+                if pose_err or face_err:
+                    message += f"\nPose: {pose_err}\nFace: {face_err}"
+                self._log.warning(message)
+                self.error_occurred.emit(message)
+        else:
+            self._gpu_delegate_warned = False
         self._log.info(
-            "Applied detection threshold. base=%.4f mode=%s multiplier=%.2f effective=%.4f head_forward=%.4f hunchback=%.2f",
+            "Applied detection threshold. base=%.4f mode=%s multiplier=%.2f effective=%.4f head_forward=%.4f hunchback=%.2f compute=%s requested_compute=%s gpu_available=%s pose_backend=%s face_backend=%s",
             base,
             settings.detection_mode,
             multiplier,
             self.detector.ratio_threshold,
             self.detector.head_forward_threshold,
             self.detector.hunchback_threshold_degrees,
+            self._compute_device,
+            requested_compute_device,
+            self._gpu_available,
+            backend_details.get("pose_backend"),
+            backend_details.get("face_backend"),
         )
         self._apply_camera_index(settings.camera_index)
         cleanup_old_capture_dirs(self.capture_base_dir, settings.retention_days, datetime.now().date())
@@ -350,6 +410,7 @@ class SitAlarmController(QObject):
             "confidence": result.confidence,
             "source": "live",
             "brightness": round(self.capture_service.frame_brightness(frame), 2),
+            "compute_device": self._compute_device,
             "debug_info": debug_info,
         }
         self.live_debug_frame_updated.emit(payload)
@@ -524,3 +585,4 @@ class SitAlarmController(QObject):
             "threshold": self.settings.head_ratio_threshold,
         }
         self.calibration_status_updated.emit(payload)
+

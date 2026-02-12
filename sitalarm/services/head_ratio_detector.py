@@ -1,9 +1,14 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import math
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from sitalarm.services.compute_device_service import effective_compute_device
+from sitalarm.services.mediapipe_model_service import (
+    ensure_face_detector_model,
+    ensure_pose_landmarker_model,
+)
 
 FaceBox = tuple[int, int, int, int]
 PoseLandmarkPoint = tuple[int, int, float]
@@ -38,29 +43,72 @@ class FaceDetector(Protocol):
 
 
 class BlazeFaceFaceDetector:
-    """Face detector powered by MediaPipe's BlazeFace model."""
+    """Face detector powered by MediaPipe.
+
+    Behavior:
+    - compute_device=cpu: use MediaPipe Solutions (no extra model downloads)
+    - compute_device=gpu: try MediaPipe Tasks + GPU delegate; fall back to Solutions on failure
+    """
 
     def __init__(
         self,
         model_selection: int = 0,
         min_detection_confidence: float = 0.5,
+        compute_device: str = "cpu",
     ) -> None:
-        try:
-            import mediapipe as mp  # type: ignore
-        except ImportError:
-            self._detector = None
-            return
+        self._compute_device = effective_compute_device(compute_device)
+        self._mp = None
+        self._tasks_detector = None
+        self._solutions_detector = None
+        self._backend = "unavailable"
+        self._gpu_init_error: str | None = None
 
         try:
-            self._detector = mp.solutions.face_detection.FaceDetection(
+            import mediapipe as mp  # type: ignore
+
+            self._mp = mp
+        except ImportError:
+            return
+
+        if self._compute_device == "gpu":
+            try:
+                from mediapipe.tasks.python import BaseOptions  # type: ignore
+                from mediapipe.tasks.python.vision import FaceDetector, FaceDetectorOptions  # type: ignore
+
+                model_path = ensure_face_detector_model()
+                options = FaceDetectorOptions(
+                    base_options=BaseOptions(
+                        model_asset_path=str(model_path),
+                        delegate=BaseOptions.Delegate.GPU,
+                    )
+                )
+                self._tasks_detector = FaceDetector.create_from_options(options)
+                self._backend = "tasks:gpu"
+                return
+            except Exception as exc:
+                self._gpu_init_error = str(exc)
+
+        try:
+            self._solutions_detector = self._mp.solutions.face_detection.FaceDetection(
                 model_selection=model_selection,
                 min_detection_confidence=min_detection_confidence,
             )
+            self._backend = "solutions:cpu"
         except Exception:
-            self._detector = None
+            self._solutions_detector = None
+
+    def backend_name(self) -> str:
+        return self._backend
+
+    def backend_details(self) -> dict[str, object]:
+        return {
+            "backend": self._backend,
+            "compute_device": self._compute_device,
+            "gpu_init_error": self._gpu_init_error,
+        }
 
     def detect(self, frame: Any) -> list[FaceBox]:
-        if self._detector is None:
+        if self._mp is None:
             return []
 
         frame_height, frame_width = frame.shape[:2]
@@ -82,12 +130,55 @@ class BlazeFaceFaceDetector:
         if frame_width > max_infer_width:
             infer_width = max_infer_width
             infer_height = max(1, int(frame_height * (infer_width / frame_width)))
-            infer_frame = cv2.resize(frame, (infer_width, infer_height))
+            if self._compute_device == "gpu" and hasattr(cv2, "ocl") and cv2.ocl.haveOpenCL():
+                infer_frame = cv2.resize(cv2.UMat(frame), (infer_width, infer_height)).get()
+            else:
+                infer_frame = cv2.resize(frame, (infer_width, infer_height))
             scale_x = frame_width / infer_width
             scale_y = frame_height / infer_height
 
-        rgb = cv2.cvtColor(infer_frame, cv2.COLOR_BGR2RGB)
-        result = self._detector.process(rgb)
+        if self._compute_device == "gpu" and hasattr(cv2, "ocl") and cv2.ocl.haveOpenCL():
+            rgb = cv2.cvtColor(cv2.UMat(infer_frame), cv2.COLOR_BGR2RGB).get()
+        else:
+            rgb = cv2.cvtColor(infer_frame, cv2.COLOR_BGR2RGB)
+
+        # Tasks (GPU)
+        if self._tasks_detector is not None:
+            try:
+                mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
+                result = self._tasks_detector.detect(mp_image)
+                detections = getattr(result, "detections", None) or []
+            except Exception:
+                detections = []
+
+            boxes: list[FaceBox] = []
+            for detection in detections:
+                bbox = getattr(detection, "bounding_box", None)
+                if bbox is None:
+                    continue
+                x = int(getattr(bbox, "origin_x", 0))
+                y = int(getattr(bbox, "origin_y", 0))
+                w = int(getattr(bbox, "width", 0))
+                h = int(getattr(bbox, "height", 0))
+
+                x = int(x * scale_x)
+                y = int(y * scale_y)
+                w = int(w * scale_x)
+                h = int(h * scale_y)
+
+                x = max(0, min(x, frame_width - 1))
+                y = max(0, min(y, frame_height - 1))
+                w = max(0, min(w, frame_width - x))
+                h = max(0, min(h, frame_height - y))
+                if w > 0 and h > 0:
+                    boxes.append((x, y, w, h))
+            return boxes
+
+        # Solutions (CPU)
+        if self._solutions_detector is None:
+            return []
+
+        result = self._solutions_detector.process(rgb)
         if not result.detections:
             return []
 
@@ -124,8 +215,10 @@ class HeadRatioPostureDetector:
         head_forward_threshold: float = DEFAULT_HEAD_FORWARD_THRESHOLD,
         hunchback_threshold_degrees: float = DEFAULT_HUNCHBACK_THRESHOLD_DEGREES,
         ear_span_too_close_threshold: float = DEFAULT_EAR_SPAN_TOO_CLOSE_THRESHOLD,
+        compute_device: str = "cpu",
     ) -> None:
-        self.face_detector = face_detector or BlazeFaceFaceDetector()
+        self.compute_device = effective_compute_device(compute_device)
+        self.face_detector = face_detector or BlazeFaceFaceDetector(compute_device=self.compute_device)
         self.ratio_threshold = ratio_threshold
         self.pose_visibility_threshold = pose_visibility_threshold
         self.hip_visibility_threshold = hip_visibility_threshold
@@ -134,6 +227,10 @@ class HeadRatioPostureDetector:
         self.ear_span_too_close_threshold = ear_span_too_close_threshold
 
         self._pose = None
+        self._pose_tasks = None
+        self._pose_backend = "unavailable"
+        self._pose_gpu_init_error: str | None = None
+        self._mp = None
         self._cv2 = None
         self._pose_landmark_ids: dict[str, int] = {}
         self._pose_connections: tuple[PoseConnection, ...] = ()
@@ -141,6 +238,19 @@ class HeadRatioPostureDetector:
         self._smoothed_trunk_angle: float | None = None
 
         self._init_pose_detector()
+
+    def backend_details(self) -> dict[str, object]:
+        face_backend = getattr(self.face_detector, "backend_name", lambda: "unknown")()
+        face_detail_getter = getattr(self.face_detector, "backend_details", None)
+        face_details = face_detail_getter() if callable(face_detail_getter) else {"backend": face_backend}
+        return {
+            "pose_backend": self._pose_backend,
+            "pose_gpu_init_error": self._pose_gpu_init_error,
+            "face_backend": face_backend,
+            "face_details": face_details,
+            "compute_device": self.compute_device,
+        }
+
 
     def evaluate_frame(self, frame: Any) -> HeadRatioResult:
         faces = self.face_detector.detect(frame)
@@ -154,6 +264,8 @@ class HeadRatioPostureDetector:
             distance_status = "too_close" if too_close else "normal"
 
         pose_status, pose_reasons, landmarks, pose_debug = self._evaluate_pose(frame)
+        pose_debug.setdefault("face_backend", getattr(self.face_detector, "backend_name", lambda: "unknown")())
+        pose_debug.setdefault("backend_details", self.backend_details())
 
         # Fallback for near-camera scenes when face box detection fails.
         if head_ratio is None and bool(pose_debug.get("head_too_close_proxy", False)):
@@ -214,6 +326,12 @@ class HeadRatioPostureDetector:
         return max(0, face_box[2]) * max(0, face_box[3])
 
     def _init_pose_detector(self) -> None:
+        # Reset before init.
+        self._pose = None
+        self._pose_tasks = None
+        self._pose_backend = "unavailable"
+        self._pose_gpu_init_error = None
+
         try:
             import cv2  # type: ignore
             import mediapipe as mp  # type: ignore
@@ -221,6 +339,50 @@ class HeadRatioPostureDetector:
             return
 
         self._cv2 = cv2
+        self._mp = mp
+
+        # Landmark indices are stable across Solutions/Tasks.
+        self._pose_landmark_ids = {
+            "nose": 0,
+            "left_ear": 7,
+            "right_ear": 8,
+            "left_shoulder": 11,
+            "right_shoulder": 12,
+            "left_hip": 23,
+            "right_hip": 24,
+        }
+        try:
+            self._pose_connections = tuple((int(a), int(b)) for a, b in mp.solutions.pose.POSE_CONNECTIONS)
+        except Exception:
+            self._pose_connections = ()
+
+        # GPU: load MediaPipe Tasks landmarker (GPU delegate) and return.
+        if self.compute_device == "gpu":
+            try:
+                from mediapipe.tasks.python import BaseOptions  # type: ignore
+                from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions  # type: ignore
+                from mediapipe.tasks.python.vision.core.vision_task_running_mode import VisionTaskRunningMode  # type: ignore
+
+                model_path = ensure_pose_landmarker_model()
+                options = PoseLandmarkerOptions(
+                    base_options=BaseOptions(
+                        model_asset_path=str(model_path),
+                        delegate=BaseOptions.Delegate.GPU,
+                    ),
+                    running_mode=VisionTaskRunningMode.IMAGE,
+                    num_poses=1,
+                    min_pose_detection_confidence=0.5,
+                    min_pose_presence_confidence=0.5,
+                    min_tracking_confidence=0.5,
+                )
+                self._pose_tasks = PoseLandmarker.create_from_options(options)
+                self._pose_backend = "tasks:gpu"
+                return
+            except Exception as exc:
+                self._pose_tasks = None
+                self._pose_gpu_init_error = str(exc)
+
+        # CPU fallback: MediaPipe Solutions.
         try:
             self._pose = mp.solutions.pose.Pose(
                 static_image_mode=False,
@@ -230,37 +392,65 @@ class HeadRatioPostureDetector:
                 min_detection_confidence=0.5,
                 min_tracking_confidence=0.5,
             )
+            self._pose_backend = "solutions:cpu"
         except Exception:
             self._pose = None
-            return
+            self._pose_backend = "unavailable"
 
-        landmark_enum = mp.solutions.pose.PoseLandmark
-        self._pose_landmark_ids = {
-            "nose": int(landmark_enum.NOSE),
-            "left_ear": int(landmark_enum.LEFT_EAR),
-            "right_ear": int(landmark_enum.RIGHT_EAR),
-            "left_shoulder": int(landmark_enum.LEFT_SHOULDER),
-            "right_shoulder": int(landmark_enum.RIGHT_SHOULDER),
-            "left_hip": int(landmark_enum.LEFT_HIP),
-            "right_hip": int(landmark_enum.RIGHT_HIP),
-        }
-        self._pose_connections = tuple((int(a), int(b)) for a, b in mp.solutions.pose.POSE_CONNECTIONS)
 
     def _evaluate_pose(
         self,
         frame: Any,
     ) -> tuple[str, tuple[str, ...], tuple[PoseLandmarkPoint, ...], dict[str, object]]:
-        if self._pose is None or self._cv2 is None:
+        if self._cv2 is None:
             return "unknown", (), (), {"pose_available": False}
 
         frame_height, frame_width = frame.shape[:2]
-        rgb = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2RGB)
-        result = self._pose.process(rgb)
-        if not result.pose_landmarks:
-            return "unknown", (), (), {"pose_available": True, "pose_detected": False}
 
-        image_landmarks = result.pose_landmarks.landmark
-        world_landmarks = result.pose_world_landmarks.landmark if result.pose_world_landmarks else None
+        if self.compute_device == "gpu" and hasattr(self._cv2, "ocl") and self._cv2.ocl.haveOpenCL():
+            rgb = self._cv2.cvtColor(self._cv2.UMat(frame), self._cv2.COLOR_BGR2RGB).get()
+        else:
+            rgb = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2RGB)
+
+        image_landmarks = None
+        world_landmarks = None
+
+        if self._pose_tasks is not None and self._mp is not None:
+            try:
+                mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
+                result = self._pose_tasks.detect(mp_image)
+                if not getattr(result, "pose_landmarks", None):
+                    return "unknown", (), (), {
+                        "pose_available": True,
+                        "pose_detected": False,
+                        "pose_backend": self._pose_backend,
+                        "compute_device": self.compute_device,
+            "pose_gpu_init_error": self._pose_gpu_init_error,
+                    }
+
+                image_landmarks = result.pose_landmarks[0]
+                if getattr(result, "pose_world_landmarks", None):
+                    world_landmarks = result.pose_world_landmarks[0]
+            except Exception:
+                image_landmarks = None
+
+        if image_landmarks is None:
+            if self._pose is None:
+                return "unknown", (), (), {"pose_available": False}
+
+            result = self._pose.process(rgb)
+            if not result.pose_landmarks:
+                return "unknown", (), (), {
+                    "pose_available": True,
+                    "pose_detected": False,
+                    "pose_backend": self._pose_backend,
+                    "compute_device": self.compute_device,
+            "pose_gpu_init_error": self._pose_gpu_init_error,
+                }
+
+            image_landmarks = result.pose_landmarks.landmark
+            world_landmarks = result.pose_world_landmarks.landmark if result.pose_world_landmarks else None
+
         points = self._pack_landmarks(image_landmarks, frame_width, frame_height)
 
         id_map = self._pose_landmark_ids
@@ -269,13 +459,16 @@ class HeadRatioPostureDetector:
         left_hip = image_landmarks[id_map["left_hip"]]
         right_hip = image_landmarks[id_map["right_hip"]]
 
-        shoulder_visibility = (left_shoulder.visibility + right_shoulder.visibility) / 2.0
-        hip_visibility = (left_hip.visibility + right_hip.visibility) / 2.0
+        shoulder_visibility = (self._vis(left_shoulder) + self._vis(right_shoulder)) / 2.0
+        hip_visibility = (self._vis(left_hip) + self._vis(right_hip)) / 2.0
         ear_span_ratio = self._ear_span_ratio(image_landmarks)
 
         debug: dict[str, object] = {
             "pose_available": True,
             "pose_detected": True,
+            "pose_backend": self._pose_backend,
+            "compute_device": self.compute_device,
+            "pose_gpu_init_error": self._pose_gpu_init_error,
             "shoulder_visibility": round(shoulder_visibility, 4),
             "hip_visibility": round(hip_visibility, 4),
             "ear_span_ratio": round(ear_span_ratio, 4) if ear_span_ratio is not None else None,
@@ -285,7 +478,6 @@ class HeadRatioPostureDetector:
             "threshold_ear_span_too_close": round(self.ear_span_too_close_threshold, 4),
         }
 
-        # Shoulder points are minimum requirement for posture analysis.
         if shoulder_visibility < self.pose_visibility_threshold:
             debug["pose_visibility_ok"] = False
             return "unknown", (), points, debug
@@ -331,6 +523,11 @@ class HeadRatioPostureDetector:
 
         status = "incorrect" if reasons else "correct"
         return status, tuple(reasons), points, debug
+    @staticmethod
+    def _vis(lm: Any) -> float:
+        value = getattr(lm, "visibility", 0.0)
+        return float(value) if isinstance(value, (int, float)) else 0.0
+
 
     def _head_forward_ratio(self, image_landmarks: Any, world_landmarks: Any) -> float | None:
         ids = self._pose_landmark_ids
@@ -352,7 +549,7 @@ class HeadRatioPostureDetector:
                 head_z_values: list[float] = []
                 for name in ("nose", "left_ear", "right_ear"):
                     idx = ids[name]
-                    if image_landmarks[idx].visibility >= 0.35:
+                    if self._vis(image_landmarks[idx]) >= 0.35:
                         head_z_values.append(float(world_landmarks[idx].z))
                 if head_z_values:
                     shoulder_z = (float(left_shoulder_w.z) + float(right_shoulder_w.z)) / 2.0
@@ -362,7 +559,7 @@ class HeadRatioPostureDetector:
         visible_x: list[float] = []
         for name in ("nose", "left_ear", "right_ear"):
             idx = ids[name]
-            if image_landmarks[idx].visibility >= 0.35:
+            if self._vis(image_landmarks[idx]) >= 0.35:
                 visible_x.append(float(image_landmarks[idx].x))
 
         shoulder_width_2d = abs(float(left_shoulder.x) - float(right_shoulder.x))
@@ -377,7 +574,7 @@ class HeadRatioPostureDetector:
         ids = self._pose_landmark_ids
         left_ear = image_landmarks[ids["left_ear"]]
         right_ear = image_landmarks[ids["right_ear"]]
-        if left_ear.visibility < 0.35 or right_ear.visibility < 0.35:
+        if self._vis(left_ear) < 0.35 or self._vis(right_ear) < 0.35:
             return None
         return abs(float(left_ear.x) - float(right_ear.x))
 
@@ -401,7 +598,9 @@ class HeadRatioPostureDetector:
         for lm in landmarks:
             x = int(max(0.0, min(1.0, float(lm.x))) * frame_width)
             y = int(max(0.0, min(1.0, float(lm.y))) * frame_height)
-            points.append((x, y, float(lm.visibility)))
+            vis = getattr(lm, "visibility", 0.0)
+            vis_f = float(vis) if isinstance(vis, (int, float)) else 0.0
+            points.append((x, y, vis_f))
         return tuple(points)
 
     @staticmethod
@@ -413,3 +612,6 @@ class HeadRatioPostureDetector:
     @staticmethod
     def _dist3(ax: float, ay: float, az: float, bx: float, by: float, bz: float) -> float:
         return math.sqrt((ax - bx) ** 2 + (ay - by) ** 2 + (az - bz) ** 2)
+
+
+

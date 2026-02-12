@@ -108,7 +108,7 @@ class BarChartWidget(QWidget):
         painter.setPen(QPen(grid_color, 1, Qt.DashLine))
         for i in range(5):
             y = chart_rect.top() + chart_rect.height() * i / 4
-            painter.drawLine(chart_rect.left(), y, chart_rect.right(), y)
+            painter.drawLine(QPointF(chart_rect.left(), y), QPointF(chart_rect.right(), y))
 
         if not self._data:
             painter.setPen(QColor(71, 85, 105, 190))
@@ -554,3 +554,4 @@ class StatsTab(QWidget):
             status_item.setTextAlignment(Qt.AlignCenter)
             self.posture_table.setItem(row_idx, 0, captured_at)
             self.posture_table.setItem(row_idx, 1, status_item)
+

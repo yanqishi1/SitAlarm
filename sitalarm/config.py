@@ -31,6 +31,10 @@ class AppSettings:
     # - "normal": threshold * 1.1
     # - "loose":  threshold * 1.2
     detection_mode: str = "normal"
+    # Compute backend preference for MediaPipe runtime.
+    # - "cpu": force CPU inference
+    # - "gpu": allow GPU acceleration when available
+    compute_device: str = "cpu"
 
 
 DEFAULT_SETTINGS = AppSettings()
@@ -46,3 +50,4 @@ def get_day_capture_dir(target_day: date) -> Path:
 
 def get_database_path() -> Path:
     return Path.home() / ".sitalarm" / "sitalarm.db"
+

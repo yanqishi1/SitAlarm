@@ -19,6 +19,7 @@ from PyQt5.QtWidgets import (
 
 from sitalarm.config import AppSettings
 from sitalarm.services.capture_service import CameraCaptureService
+from sitalarm.services.compute_device_service import gpu_available
 
 
 class SettingsTab(QWidget):
@@ -32,6 +33,7 @@ class SettingsTab(QWidget):
         super().__init__()
         self._loading = False
         self._autosave_timer = None
+        self._gpu_available = gpu_available()
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -106,12 +108,20 @@ class SettingsTab(QWidget):
         form.addWidget(self._field_label("检测模式"), 0, 0)
         form.addWidget(self.detection_mode, 0, 1)
 
+        self.compute_device = QComboBox()
+        self.compute_device.setObjectName("WideInput")
+        self.compute_device.addItem("CPU", "cpu")
+        if self._gpu_available:
+            self.compute_device.addItem("GPU (加速)", "gpu")
+        form.addWidget(self._field_label("识别加速"), 1, 0)
+        form.addWidget(self.compute_device, 1, 1)
+
         self.reminder_method = QComboBox()
         self.reminder_method.addItem("降低屏幕亮度 (默认)", "dim_screen")
         self.reminder_method.addItem("弹出框提醒", "popup")
         self.reminder_method.setObjectName("WideInput")
-        form.addWidget(self._field_label("提醒方式"), 1, 0)
-        form.addWidget(self.reminder_method, 1, 1)
+        form.addWidget(self._field_label("提醒方式"), 2, 0)
+        form.addWidget(self.reminder_method, 2, 1)
 
         interval_wrap = QHBoxLayout()
         interval_wrap.setSpacing(10)
@@ -121,11 +131,11 @@ class SettingsTab(QWidget):
         interval_wrap.addWidget(self.capture_interval)
         interval_wrap.addWidget(QLabel("秒"))
         interval_wrap.addStretch(1)
-        form.addWidget(self._field_label("检测间隔"), 2, 0)
-        form.addLayout(interval_wrap, 2, 1)
+        form.addWidget(self._field_label("检测间隔"), 3, 0)
+        form.addLayout(interval_wrap, 3, 1)
 
         self.screen_time_enabled = QCheckBox("启用屏幕超时提醒")
-        form.addWidget(self.screen_time_enabled, 3, 0, 1, 2)
+        form.addWidget(self.screen_time_enabled, 4, 0, 1, 2)
 
         self.screen_time_threshold = QSpinBox()
         self.screen_time_threshold.setRange(10, 240)
@@ -134,8 +144,8 @@ class SettingsTab(QWidget):
         threshold_wrap.setSpacing(0)
         threshold_wrap.addStretch(1)
         threshold_wrap.addWidget(self.screen_time_threshold)
-        form.addWidget(self._field_label("屏幕超时时间值（分钟）"), 4, 0)
-        form.addLayout(threshold_wrap, 4, 1)
+        form.addWidget(self._field_label("屏幕超时时间值（分钟）"), 5, 0)
+        form.addLayout(threshold_wrap, 5, 1)
 
         self.retention = QSpinBox()
         self.retention.setRange(1, 30)
@@ -144,8 +154,8 @@ class SettingsTab(QWidget):
         retention_wrap.setSpacing(0)
         retention_wrap.addStretch(1)
         retention_wrap.addWidget(self.retention)
-        form.addWidget(self._field_label("图片保留天数"), 5, 0)
-        form.addLayout(retention_wrap, 5, 1)
+        form.addWidget(self._field_label("图片保留天数"), 6, 0)
+        form.addLayout(retention_wrap, 6, 1)
 
         reminder_layout.addLayout(form)
         root.addWidget(reminder_group)
@@ -216,6 +226,7 @@ class SettingsTab(QWidget):
         self._set_camera_index(settings.camera_index)
         self._set_reminder_method(settings.reminder_method)
         self._set_detection_mode(settings.detection_mode)
+        self._set_compute_device(getattr(settings, "compute_device", "cpu"))
         self._loading = False
 
         if settings.head_ratio_threshold > 0:
@@ -247,6 +258,7 @@ class SettingsTab(QWidget):
             "capture_interval_seconds": self.capture_interval.value(),
             "camera_index": selected_camera if selected_camera is not None else 0,
             "detection_mode": str(self.detection_mode.currentData() or "strict"),
+            "compute_device": str(self.compute_device.currentData() or "cpu"),
             "reminder_method": str(self.reminder_method.currentData() or "dim_screen"),
             "screen_time_enabled": self.screen_time_enabled.isChecked(),
             "screen_time_threshold_minutes": self.screen_time_threshold.value(),
@@ -263,6 +275,7 @@ class SettingsTab(QWidget):
         self.capture_interval.valueChanged.connect(lambda *_: self._schedule_autosave())
         self.camera_combo.currentIndexChanged.connect(lambda *_: self._schedule_autosave())
         self.detection_mode.currentIndexChanged.connect(lambda *_: self._schedule_autosave())
+        self.compute_device.currentIndexChanged.connect(lambda *_: self._schedule_autosave())
         self.reminder_method.currentIndexChanged.connect(lambda *_: self._schedule_autosave())
         self.screen_time_enabled.toggled.connect(lambda *_: self._schedule_autosave())
         self.screen_time_threshold.valueChanged.connect(lambda *_: self._schedule_autosave())
@@ -311,4 +324,13 @@ class SettingsTab(QWidget):
         for i in range(self.detection_mode.count()):
             if str(self.detection_mode.itemData(i)) == mode:
                 self.detection_mode.setCurrentIndex(i)
+                return
+
+    def _set_compute_device(self, device: str) -> None:
+        requested = str(device or "cpu")
+        if requested == "gpu" and not self._gpu_available:
+            requested = "cpu"
+        for i in range(self.compute_device.count()):
+            if str(self.compute_device.itemData(i)) == requested:
+                self.compute_device.setCurrentIndex(i)
                 return
