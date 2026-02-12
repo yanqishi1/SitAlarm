@@ -23,7 +23,7 @@
 - 所有数据本地存储（SQLite + 本地图片）
 
 ![img.png](docs/main.png)
-![img.png](docs/img.png)
+![img.png](docs/statistic.png)
 ## 系统要求
 
 | 项目 | 要求 |
