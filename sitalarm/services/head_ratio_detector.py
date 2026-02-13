@@ -1,8 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, Tuple
 
 from sitalarm.services.compute_device_service import effective_compute_device
 from sitalarm.services.mediapipe_model_service import (
@@ -10,9 +10,9 @@ from sitalarm.services.mediapipe_model_service import (
     ensure_pose_landmarker_model,
 )
 
-FaceBox = tuple[int, int, int, int]
-PoseLandmarkPoint = tuple[int, int, float]
-PoseConnection = tuple[int, int]
+FaceBox = Tuple[int, int, int, int]
+PoseLandmarkPoint = Tuple[int, int, float]
+PoseConnection = Tuple[int, int]
 
 DEFAULT_HEAD_RATIO_THRESHOLD = 0.15
 CALIBRATION_SAFETY_MARGIN = 0.30
@@ -108,7 +108,7 @@ class BlazeFaceFaceDetector:
         }
 
     def __del__(self):
-        """析构函数，确保人脸检测模型资源被释放"""
+        """Release MediaPipe resources when this instance is garbage-collected."""
         try:
             if hasattr(self, '_solutions_detector') and self._solutions_detector is not None:
                 self._solutions_detector.close()
@@ -666,7 +666,7 @@ class HeadRatioPostureDetector:
 
 
     def __del__(self):
-        """析构函数，确保 MediaPipe 模型资源被释放"""
+        """Release MediaPipe resources when this instance is garbage-collected."""
         try:
             if hasattr(self, '_pose') and self._pose is not None:
                 self._pose.close()

@@ -4,4 +4,14 @@
 .gradle
 .docs
 .venv-build-py2app
-__pycache__/
+__pycache__/# Windows build artifacts
+build/
+dist/
+release/
+# Local venvs
+.venv/
+.venv-win/
+# PyInstaller
+*.spec
+# Inno Setup output
+installer/output/
