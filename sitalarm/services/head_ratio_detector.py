@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import math
 from dataclasses import dataclass
@@ -15,10 +15,10 @@ PoseLandmarkPoint = tuple[int, int, float]
 PoseConnection = tuple[int, int]
 
 DEFAULT_HEAD_RATIO_THRESHOLD = 0.15
-CALIBRATION_SAFETY_MARGIN = 0.15
+CALIBRATION_SAFETY_MARGIN = 0.30
 DEFAULT_POSE_VISIBILITY_THRESHOLD = 0.35
 DEFAULT_HIP_VISIBILITY_THRESHOLD = 0.25
-DEFAULT_HEAD_FORWARD_THRESHOLD = 0.24
+DEFAULT_HEAD_FORWARD_THRESHOLD = 0.28
 DEFAULT_HUNCHBACK_THRESHOLD_DEGREES = 14.0
 DEFAULT_EAR_SPAN_TOO_CLOSE_THRESHOLD = 0.19
 
@@ -52,7 +52,7 @@ class BlazeFaceFaceDetector:
 
     def __init__(
         self,
-        model_selection: int = 0,
+        model_selection: int = 1,
         min_detection_confidence: float = 0.5,
         compute_device: str = "cpu",
     ) -> None:
@@ -216,6 +216,9 @@ class HeadRatioPostureDetector:
         hunchback_threshold_degrees: float = DEFAULT_HUNCHBACK_THRESHOLD_DEGREES,
         ear_span_too_close_threshold: float = DEFAULT_EAR_SPAN_TOO_CLOSE_THRESHOLD,
         compute_device: str = "cpu",
+        pose_model_complexity: int = 1,
+        camera_angle_mode: str = "upper_body",
+        ema_alpha: float = 0.25,
     ) -> None:
         self.compute_device = effective_compute_device(compute_device)
         self.face_detector = face_detector or BlazeFaceFaceDetector(compute_device=self.compute_device)
@@ -225,6 +228,9 @@ class HeadRatioPostureDetector:
         self.head_forward_threshold = head_forward_threshold
         self.hunchback_threshold_degrees = hunchback_threshold_degrees
         self.ear_span_too_close_threshold = ear_span_too_close_threshold
+        self.pose_model_complexity = max(0, min(2, pose_model_complexity))
+        self.camera_angle_mode = camera_angle_mode
+        self.ema_alpha = ema_alpha
 
         self._pose = None
         self._pose_tasks = None
@@ -306,9 +312,19 @@ class HeadRatioPostureDetector:
         if len(correct_ratios) < 2:
             raise ValueError("At least two correct-posture samples are required for calibration.")
 
-        max_ratio = max(correct_ratios)
+        import math as _math
+
         margin = max(0.0, safety_margin)
-        return min(1.0, max_ratio * (1.0 + margin))
+        max_ratio = max(correct_ratios)
+        mean_ratio = sum(correct_ratios) / len(correct_ratios)
+        # Use whichever is larger: max-based or (mean + 1 stddev)-based.
+        if len(correct_ratios) >= 3:
+            variance = sum((r - mean_ratio) ** 2 for r in correct_ratios) / len(correct_ratios)
+            stddev = _math.sqrt(variance)
+            base = max(max_ratio, mean_ratio + stddev)
+        else:
+            base = max_ratio
+        return min(1.0, base * (1.0 + margin))
 
     @staticmethod
     def calculate_head_ratio(face_box: FaceBox, frame_shape: tuple[int, ...]) -> float:
@@ -386,7 +402,7 @@ class HeadRatioPostureDetector:
         try:
             self._pose = mp.solutions.pose.Pose(
                 static_image_mode=False,
-                model_complexity=0,
+                model_complexity=self.pose_model_complexity,
                 smooth_landmarks=True,
                 enable_segmentation=False,
                 min_detection_confidence=0.5,
@@ -469,6 +485,8 @@ class HeadRatioPostureDetector:
             "pose_backend": self._pose_backend,
             "compute_device": self.compute_device,
             "pose_gpu_init_error": self._pose_gpu_init_error,
+            "model_complexity": self.pose_model_complexity,
+            "camera_angle_mode": self.camera_angle_mode,
             "shoulder_visibility": round(shoulder_visibility, 4),
             "hip_visibility": round(hip_visibility, 4),
             "ear_span_ratio": round(ear_span_ratio, 4) if ear_span_ratio is not None else None,
@@ -487,11 +505,18 @@ class HeadRatioPostureDetector:
             debug["pose_visibility_ok"] = False
             return "unknown", (), points, debug
 
-        head_forward_ratio = self._ema(self._smoothed_head_forward, head_forward_ratio)
+        head_forward_ratio = self._ema(self._smoothed_head_forward, head_forward_ratio, self.ema_alpha)
         self._smoothed_head_forward = head_forward_ratio
 
+        # Determine if we're in upper body mode (hips not visible or user configured)
+        upper_body_mode = (
+            self.camera_angle_mode == "upper_body"
+            or hip_visibility < self.hip_visibility_threshold
+        )
+        debug["upper_body_mode"] = upper_body_mode
+
         trunk_angle: float | None = None
-        if hip_visibility >= self.hip_visibility_threshold:
+        if not upper_body_mode and hip_visibility >= self.hip_visibility_threshold:
             shoulder_center = (
                 (left_shoulder.x + right_shoulder.x) / 2.0,
                 (left_shoulder.y + right_shoulder.y) / 2.0,
@@ -502,11 +527,18 @@ class HeadRatioPostureDetector:
             )
             trunk_angle_raw = self._trunk_angle_degrees(shoulder_center, hip_center)
             if trunk_angle_raw is not None:
-                trunk_angle = self._ema(self._smoothed_trunk_angle, trunk_angle_raw)
+                trunk_angle = self._ema(self._smoothed_trunk_angle, trunk_angle_raw, self.ema_alpha)
                 self._smoothed_trunk_angle = trunk_angle
 
+        # Adjust head forward threshold for upper body / laptop webcam mode.
+        # Low-angle cameras exaggerate the perceived head-forward offset due to
+        # perspective distortion, so we RELAX the threshold to compensate.
+        effective_head_forward_threshold = self.head_forward_threshold
+        if upper_body_mode:
+            effective_head_forward_threshold = self.head_forward_threshold * 1.15
+
         reasons: list[str] = []
-        if head_forward_ratio >= self.head_forward_threshold:
+        if head_forward_ratio >= effective_head_forward_threshold:
             reasons.append("head_forward")
         if trunk_angle is not None and trunk_angle >= self.hunchback_threshold_degrees:
             reasons.append("hunchback")
@@ -516,8 +548,10 @@ class HeadRatioPostureDetector:
                 "pose_visibility_ok": True,
                 "head_forward_ratio": round(head_forward_ratio, 4),
                 "trunk_angle_degrees": round(trunk_angle, 4) if trunk_angle is not None else None,
-                "threshold_head_forward": round(self.head_forward_threshold, 4),
+                "threshold_head_forward": round(effective_head_forward_threshold, 4),
+                "threshold_head_forward_base": round(self.head_forward_threshold, 4),
                 "threshold_hunchback": round(self.hunchback_threshold_degrees, 4),
+                "ema_alpha": self.ema_alpha,
             }
         )
 

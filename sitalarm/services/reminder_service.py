@@ -15,7 +15,8 @@ REMINDER_MESSAGES = {
 
 class ReminderPolicy:
     def __init__(self, cooldown_minutes: int) -> None:
-        self.cooldown = timedelta(minutes=max(1, cooldown_minutes))
+        # Cooldown disabled - always notify when posture is incorrect
+        self.cooldown = timedelta(minutes=0)
         self._last_sent: dict[str, datetime] = {}
 
     def should_notify(self, reasons: list[str] | tuple[str, ...], now: datetime) -> bool:

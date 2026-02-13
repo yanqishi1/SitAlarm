@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 from dataclasses import asdict
@@ -63,6 +63,8 @@ class SitAlarmController(QObject):
         self.detector = HeadRatioPostureDetector(
             ratio_threshold=self._effective_head_ratio_threshold(self.settings.head_ratio_threshold),
             compute_device=self._compute_device,
+            pose_model_complexity=getattr(self.settings, "pose_model_complexity", 1),
+            camera_angle_mode=getattr(self.settings, "camera_angle_mode", "upper_body"),
         )
         self.reminder_policy = ReminderPolicy(self.settings.reminder_cooldown_minutes)
 
@@ -72,8 +74,19 @@ class SitAlarmController(QObject):
         self._paused = False
         self._screen_start = datetime.now()
         self._last_posture_status: str | None = None
-        self._required_calibration_samples = 2
+        # Consecutive incorrect detections counter – requires N consecutive
+        # "incorrect" results before a reminder is triggered to avoid false alarms.
+        self._consecutive_incorrect: int = 0
+        self._consecutive_incorrect_threshold: int = 1  # need 1 consecutive incorrect (immediate reminder)
+        self._required_calibration_samples = 3
         self._calibration_ratios: list[float] = []
+        self._calibration_head_forward_ratios: list[float] = []
+        self._calibration_image_paths: list[str] = []
+        # Incorrect-posture calibration (phase 2)
+        self._required_incorrect_samples = 2
+        self._calibration_incorrect_ratios: list[float] = []
+        self._calibration_incorrect_head_forward_ratios: list[float] = []
+        self._calibration_incorrect_image_paths: list[str] = []
         self._system_usage = SystemUsageService()
 
         self._timer = QTimer(self)
@@ -172,12 +185,23 @@ class SitAlarmController(QObject):
             hunchback_threshold_degrees=self.detector.hunchback_threshold_degrees,
             ear_span_too_close_threshold=self.detector.ear_span_too_close_threshold,
             compute_device=self._compute_device,
+            pose_model_complexity=getattr(settings, "pose_model_complexity", 1),
+            camera_angle_mode=getattr(settings, "camera_angle_mode", "upper_body"),
         )
 
         base = self._effective_head_ratio_threshold(settings.head_ratio_threshold)
         multiplier = self._threshold_multiplier(settings.detection_mode)
         self.detector.ratio_threshold = min(1.0, base * multiplier)
-        self.detector.head_forward_threshold = min(1.0, DEFAULT_HEAD_FORWARD_THRESHOLD * multiplier)
+
+        # Use calibrated head forward threshold if available, otherwise use default
+        calibrated_head_forward = getattr(settings, "head_forward_threshold_calibrated", 0.0)
+        if calibrated_head_forward > 0:
+            # Use calibrated threshold with detection mode multiplier
+            self.detector.head_forward_threshold = min(1.0, calibrated_head_forward * multiplier)
+        else:
+            # Use default threshold with detection mode multiplier
+            self.detector.head_forward_threshold = min(1.0, DEFAULT_HEAD_FORWARD_THRESHOLD * multiplier)
+
         self.detector.hunchback_threshold_degrees = min(45.0, DEFAULT_HUNCHBACK_THRESHOLD_DEGREES * multiplier)
         backend_details = self.detector.backend_details()
         if str(requested_compute_device).lower() == "gpu":
@@ -200,12 +224,13 @@ class SitAlarmController(QObject):
         else:
             self._gpu_delegate_warned = False
         self._log.info(
-            "Applied detection threshold. base=%.4f mode=%s multiplier=%.2f effective=%.4f head_forward=%.4f hunchback=%.2f compute=%s requested_compute=%s gpu_available=%s pose_backend=%s face_backend=%s",
+            "Applied detection threshold. base=%.4f mode=%s multiplier=%.2f effective=%.4f head_forward=%.4f (calibrated=%.4f) hunchback=%.2f compute=%s requested_compute=%s gpu_available=%s pose_backend=%s face_backend=%s",
             base,
             settings.detection_mode,
             multiplier,
             self.detector.ratio_threshold,
             self.detector.head_forward_threshold,
+            calibrated_head_forward,
             self.detector.hunchback_threshold_degrees,
             self._compute_device,
             requested_compute_device,
@@ -225,7 +250,7 @@ class SitAlarmController(QObject):
             self.state_changed.emit("待校准")
             self._emit_calibration_status(
                 phase="required",
-                message="请先在设置页拍摄 2 张正确坐姿照片完成校准。",
+                message="请先在设置页拍摄 3 张正确坐姿照片完成校准。",
             )
             return
 
@@ -316,38 +341,191 @@ class SitAlarmController(QObject):
             self.error_occurred.emit("未识别到头部，请调整光线或角度后重试。")
             self._emit_calibration_status(
                 phase="error",
-                message=f"第 {sample_index}/2 张未识别到头部，请保持正对摄像头并重拍。",
+                message=f"第 {sample_index}/{self._required_calibration_samples} 张未识别到头部，请保持正对摄像头并重拍。",
             )
             return
 
+        # Collect data
         self._calibration_ratios.append(ratio_result.head_ratio)
+        self._calibration_image_paths.append(str(image_path))
+
+        head_forward_ratio = ratio_result.pose_debug.get("head_forward_ratio")
+        if head_forward_ratio is not None and isinstance(head_forward_ratio, (int, float)):
+            self._calibration_head_forward_ratios.append(float(head_forward_ratio))
+            self._log.info(
+                "Calibration sample %d: head_ratio=%.4f, head_forward_ratio=%.4f",
+                sample_index, ratio_result.head_ratio, head_forward_ratio,
+            )
+        else:
+            # Pad with 0.0 to keep indices aligned with _calibration_ratios
+            self._calibration_head_forward_ratios.append(0.0)
+            self._log.info(
+                "Calibration sample %d: head_ratio=%.4f, head_forward_ratio=None",
+                sample_index, ratio_result.head_ratio,
+            )
+
         captured_count = len(self._calibration_ratios)
         if captured_count < self._required_calibration_samples:
             self._emit_calibration_status(
                 phase="partial",
-                message=f"已完成第 {captured_count}/2 张，请保持正确坐姿再拍第 2 张。",
+                message=f"正确坐姿：已完成第 {captured_count}/{self._required_calibration_samples} 张，请保持正确坐姿继续拍下一张。",
             )
             return
 
-        threshold = HeadRatioPostureDetector.recommend_threshold(
-            self._calibration_ratios,
-            safety_margin=CALIBRATION_SAFETY_MARGIN,
+        # Phase 1 done – correct posture samples collected.
+        # Transition to phase 2: collect incorrect posture samples.
+        self._log.info(
+            "Correct posture calibration done. ratios=%s head_forward=%s",
+            [round(r, 4) for r in self._calibration_ratios],
+            [round(r, 4) for r in self._calibration_head_forward_ratios],
         )
-        rounded_threshold = round(threshold, 4)
-        self.update_settings(head_ratio_threshold=rounded_threshold)
+        self._emit_calibration_status(
+            phase="correct_done",
+            message="正确坐姿采集完成！请做出不正确坐姿（如低头/前倾），然后点击「拍摄错误姿势样本」。",
+        )
+
+    def capture_incorrect_posture_calibration_sample(self) -> None:
+        """Phase 2 of calibration: capture an incorrect-posture sample."""
+        if len(self._calibration_ratios) < self._required_calibration_samples:
+            self.error_occurred.emit("请先完成正确坐姿采集。")
+            return
+
+        now = datetime.now()
+        sample_index = len(self._calibration_incorrect_ratios) + 1
+        day_dir = ensure_day_capture_dir(self.capture_base_dir, now.date())
+        image_path = day_dir / f"calib_incorrect_{sample_index}_{now.strftime('%H%M%S')}.jpg"
+
+        try:
+            raw_frame = self._capture_frame_for_detection()
+            frame, _ = self._prepare_frame_for_detection(raw_frame)
+            self.capture_service.save_frame(frame, image_path)
+        except CaptureError as exc:
+            self.error_occurred.emit(str(exc))
+            self._emit_calibration_status(phase="error", message=str(exc))
+            return
+
+        ratio_result = self.detector.evaluate_frame(frame)
+        if ratio_result.head_ratio is None:
+            self.error_occurred.emit("未识别到头部，请调整光线或角度后重试。")
+            self._emit_calibration_status(
+                phase="error",
+                message=f"错误坐姿第 {sample_index}/{self._required_incorrect_samples} 张未识别到头部，请保持正对摄像头并重拍。",
+            )
+            return
+
+        self._calibration_incorrect_ratios.append(ratio_result.head_ratio)
+        self._calibration_incorrect_image_paths.append(str(image_path))
+
+        head_forward_ratio = ratio_result.pose_debug.get("head_forward_ratio")
+        if head_forward_ratio is not None and isinstance(head_forward_ratio, (int, float)):
+            self._calibration_incorrect_head_forward_ratios.append(float(head_forward_ratio))
+            self._log.info(
+                "Incorrect calibration sample %d: head_ratio=%.4f, head_forward_ratio=%.4f",
+                sample_index, ratio_result.head_ratio, head_forward_ratio,
+            )
+        else:
+            self._calibration_incorrect_head_forward_ratios.append(0.0)
+            self._log.info(
+                "Incorrect calibration sample %d: head_ratio=%.4f, head_forward_ratio=None",
+                sample_index, ratio_result.head_ratio,
+            )
+
+        captured_count = len(self._calibration_incorrect_ratios)
+        if captured_count < self._required_incorrect_samples:
+            self._emit_calibration_status(
+                phase="collecting_incorrect",
+                message=f"错误坐姿：已完成第 {captured_count}/{self._required_incorrect_samples} 张，请保持错误坐姿继续拍下一张。",
+            )
+            return
+
+        # ------ Both phases done: calculate midpoint thresholds ------
+        self._finalize_calibration()
+
+    def _finalize_calibration(self) -> None:
+        """Calculate thresholds from both correct & incorrect posture samples."""
+        max_correct_ratio = max(self._calibration_ratios)
+        min_incorrect_ratio = min(self._calibration_incorrect_ratios)
+
+        # Head ratio threshold: midpoint between correct-max and incorrect-min.
+        # If incorrect ratio is surprisingly lower (edge case), fall back to safety-margin method.
+        if min_incorrect_ratio > max_correct_ratio:
+            head_ratio_threshold = round((max_correct_ratio + min_incorrect_ratio) / 2.0, 4)
+        else:
+            head_ratio_threshold = round(max_correct_ratio * (1.0 + CALIBRATION_SAFETY_MARGIN), 4)
+
+        self._log.info(
+            "Head ratio calibration: correct_max=%.4f incorrect_min=%.4f → threshold=%.4f",
+            max_correct_ratio, min_incorrect_ratio, head_ratio_threshold,
+        )
+
+        # Head forward threshold: same midpoint logic.
+        head_forward_threshold = 0.0
+        if self._calibration_head_forward_ratios and self._calibration_incorrect_head_forward_ratios:
+            max_correct_hf = max(self._calibration_head_forward_ratios)
+            min_incorrect_hf = min(self._calibration_incorrect_head_forward_ratios)
+            if min_incorrect_hf > max_correct_hf:
+                head_forward_threshold = round((max_correct_hf + min_incorrect_hf) / 2.0, 4)
+            else:
+                head_forward_threshold = round(max_correct_hf * (1.0 + CALIBRATION_SAFETY_MARGIN), 4)
+            self._log.info(
+                "Head forward calibration: correct_max=%.4f incorrect_min=%.4f → threshold=%.4f",
+                max_correct_hf, min_incorrect_hf, head_forward_threshold,
+            )
+
+        self.update_settings(
+            head_ratio_threshold=head_ratio_threshold,
+            head_forward_threshold_calibrated=head_forward_threshold,
+        )
 
         self.state_changed.emit("检测中")
-        # 注意：先发送校准完成信号，再清空 _calibration_ratios
-        # 这样信号中的 captured 才是正确的值（2）
-        self._emit_calibration_status(
-            phase="completed",
-            message=f"校准完成，当前头占比阈值：{rounded_threshold:.4f}",
-        )
+
+        message = f"校准完成！头占比阈值：{head_ratio_threshold:.4f}"
+        if head_forward_threshold > 0:
+            message += f"，头部前倾阈值：{head_forward_threshold:.4f}"
+        self._emit_calibration_status(phase="completed", message=message)
+
+        # Clear all calibration buffers.
+        self._clear_calibration_buffers()
+
+    def remove_correct_calibration_sample(self, index: int) -> None:
+        """Remove a correct-posture calibration sample by index."""
+        if 0 <= index < len(self._calibration_ratios):
+            self._calibration_ratios.pop(index)
+            if index < len(self._calibration_head_forward_ratios):
+                self._calibration_head_forward_ratios.pop(index)
+            if index < len(self._calibration_image_paths):
+                self._calibration_image_paths.pop(index)
+            self._log.info("Removed correct calibration sample at index %d", index)
+            self._emit_calibration_status(
+                phase="partial",
+                message=f"已删除第 {index + 1} 张正确坐姿样本，请重新拍摄。",
+            )
+
+    def remove_incorrect_calibration_sample(self, index: int) -> None:
+        """Remove an incorrect-posture calibration sample by index."""
+        if 0 <= index < len(self._calibration_incorrect_ratios):
+            self._calibration_incorrect_ratios.pop(index)
+            if index < len(self._calibration_incorrect_head_forward_ratios):
+                self._calibration_incorrect_head_forward_ratios.pop(index)
+            if index < len(self._calibration_incorrect_image_paths):
+                self._calibration_incorrect_image_paths.pop(index)
+            self._log.info("Removed incorrect calibration sample at index %d", index)
+            self._emit_calibration_status(
+                phase="collecting_incorrect",
+                message=f"已删除第 {index + 1} 张错误坐姿样本，请重新拍摄。",
+            )
+
+    def _clear_calibration_buffers(self) -> None:
         self._calibration_ratios.clear()
+        self._calibration_head_forward_ratios.clear()
+        self._calibration_image_paths.clear()
+        self._calibration_incorrect_ratios.clear()
+        self._calibration_incorrect_head_forward_ratios.clear()
+        self._calibration_incorrect_image_paths.clear()
 
     def reset_head_ratio_calibration(self) -> None:
-        self._calibration_ratios.clear()
-        self.update_settings(head_ratio_threshold=0.0)
+        self._clear_calibration_buffers()
+        self.update_settings(head_ratio_threshold=0.0, head_forward_threshold_calibrated=0.0)
         self._emit_calibration_required()
 
     def open_today_capture_dir(self) -> Path:
@@ -456,10 +634,17 @@ class SitAlarmController(QObject):
         )
 
         # Build a "current message" for UI refresh on every detection.
+        debug = result.debug_info or {}
+        head_ratio_val = debug.get("head_ratio")
+        threshold_val = debug.get("threshold_head_ratio")
+        ratio_hint = ""
+        if head_ratio_val is not None and threshold_val is not None:
+            ratio_hint = f"（头占比 {head_ratio_val:.4f} / 阈值 {threshold_val:.4f}）"
+
         if result.status == "incorrect":
-            ui_message = self.reminder_policy.build_message(result.reasons)
+            ui_message = self.reminder_policy.build_message(result.reasons) + ratio_hint
         elif result.status == "correct":
-            ui_message = "坐姿正常，继续保持。"
+            ui_message = f"坐姿正常，继续保持。{ratio_hint}"
         else:
             ui_message = "未识别到头部，请调整角度/光线后重试。"
 
@@ -470,6 +655,11 @@ class SitAlarmController(QObject):
             "message": ui_message,
             "image_path": str(image_path),
             "confidence": result.confidence,
+            # Detection metrics for dashboard display
+            "head_ratio": debug.get("head_ratio"),
+            "threshold_head_ratio": debug.get("threshold_head_ratio"),
+            "head_forward_ratio": debug.get("head_forward_ratio"),
+            "threshold_head_forward": debug.get("threshold_head_forward"),
         }
         self.event_logged.emit(payload)
 
@@ -487,7 +677,12 @@ class SitAlarmController(QObject):
         # The dashboard always shows the latest status message per detection.
         # Actual reminder (dim/popup) should trigger at least once when posture
         # transitions into incorrect, even if cooldown would otherwise suppress it.
+        #
+        # Anti-false-alarm: require N consecutive "incorrect" detections before
+        # actually triggering a reminder.  A single transient mis-detection
+        # (e.g. momentary head movement) is silently ignored.
         if result.status == "unknown":
+            self._consecutive_incorrect = 0
             transitioned = self._last_posture_status != "unknown"
             reasons = ("detection_failed",)
             due = transitioned or self.reminder_policy.should_notify(reasons, now)
@@ -495,15 +690,36 @@ class SitAlarmController(QObject):
                 self._log.info("Detection failed reminder. transitioned=%s", transitioned)
                 self.reminder_triggered.emit(self.reminder_policy.build_message(reasons))
 
-        if result.status == "incorrect":
-            transitioned = self._last_posture_status != "incorrect"
-            due = transitioned or self.reminder_policy.should_notify(result.reasons, now)
-            if due:
-                message = self.reminder_policy.build_message(result.reasons)
-                self._log.info("Reminder triggered. transitioned=%s reasons=%s", transitioned, list(result.reasons))
-                self.reminder_triggered.emit(message)
+        elif result.status == "incorrect":
+            self._consecutive_incorrect += 1
+            self._log.info(
+                "Incorrect detected. consecutive=%d/%d",
+                self._consecutive_incorrect,
+                self._consecutive_incorrect_threshold,
+            )
+            if self._consecutive_incorrect >= self._consecutive_incorrect_threshold:
+                transitioned = self._last_posture_status != "incorrect"
+                due = transitioned or self.reminder_policy.should_notify(result.reasons, now)
+                if due:
+                    message = self.reminder_policy.build_message(result.reasons)
+                    self._log.info(
+                        "Reminder triggered. transitioned=%s reasons=%s consecutive=%d",
+                        transitioned,
+                        list(result.reasons),
+                        self._consecutive_incorrect,
+                    )
+                    self.reminder_triggered.emit(message)
+                else:
+                    self._log.info("Reminder suppressed by cooldown. reasons=%s", list(result.reasons))
             else:
-                self._log.info("Reminder suppressed by cooldown. reasons=%s", list(result.reasons))
+                self._log.info(
+                    "Incorrect but below consecutive threshold (%d/%d), not triggering yet.",
+                    self._consecutive_incorrect,
+                    self._consecutive_incorrect_threshold,
+                )
+        else:
+            # correct posture – reset the counter
+            self._consecutive_incorrect = 0
 
         self._last_posture_status = result.status
 
@@ -564,25 +780,30 @@ class SitAlarmController(QObject):
             return True
 
         self.state_changed.emit("待校准")
-        self.error_occurred.emit("请先在设置页完成头占比校准（拍摄 2 张正确坐姿照片）。")
+        self.error_occurred.emit("请先在设置页完成坐姿校准（拍摄 3 张正确 + 2 张错误坐姿照片）。")
         self._emit_calibration_required()
         return False
 
     def _emit_calibration_required(self) -> None:
-        message = "首次使用请先校准：在设置页拍 2 张正确坐姿照片，系统会自动计算阈值。"
+        message = "首次使用请先校准：拍 3 张正确坐姿 + 2 张错误坐姿照片，系统会自动计算阈值。"
         self.calibration_required.emit(message)
         self._emit_calibration_status(
             phase="required",
-            message="请在设置页拍摄 2 张正确坐姿照片完成校准。",
+            message="请先拍摄 3 张正确坐姿照片开始校准。",
         )
 
     def _emit_calibration_status(self, phase: str, message: str) -> None:
         payload = {
             "phase": phase,
             "message": message,
-            "captured": len(self._calibration_ratios),
-            "required": self._required_calibration_samples,
+            "captured_correct": len(self._calibration_ratios),
+            "required_correct": self._required_calibration_samples,
+            "captured_incorrect": len(self._calibration_incorrect_ratios),
+            "required_incorrect": self._required_incorrect_samples,
             "threshold": self.settings.head_ratio_threshold,
+            "head_forward_threshold": getattr(self.settings, "head_forward_threshold_calibrated", 0.0),
+            "correct_image_paths": list(self._calibration_image_paths),
+            "incorrect_image_paths": list(self._calibration_incorrect_image_paths),
         }
         self.calibration_status_updated.emit(payload)
 

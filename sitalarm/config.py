@@ -35,6 +35,18 @@ class AppSettings:
     # - "cpu": force CPU inference
     # - "gpu": allow GPU acceleration when available
     compute_device: str = "cpu"
+    # MediaPipe Pose model complexity:
+    # - 0: Lite (fast, lower Z-axis accuracy)
+    # - 1: Full (balanced, better Z-axis accuracy) - recommended for non-realtime detection
+    # - 2: Heavy (slow, best Z-axis accuracy)
+    pose_model_complexity: int = 1
+    # Camera angle mode affects detection strategy:
+    # - "upper_body": only shoulders and above visible, disable hunchback detection
+    # - "full_body": full body visible, enable all detection types
+    camera_angle_mode: str = "upper_body"
+    # Calibrated head forward ratio threshold (0.0 means not calibrated yet).
+    # This is calculated from calibration samples: max(samples) * 1.15
+    head_forward_threshold_calibrated: float = 0.0
 
 
 DEFAULT_SETTINGS = AppSettings()

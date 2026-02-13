@@ -26,6 +26,7 @@ class SettingsTab(QWidget):
     settings_changed = pyqtSignal(dict)
     open_capture_dir_requested = pyqtSignal()
     calibration_capture_requested = pyqtSignal()
+    calibration_incorrect_capture_requested = pyqtSignal()
     calibration_reset_requested = pyqtSignal()
     preview_camera_requested = pyqtSignal()
 
@@ -160,31 +161,51 @@ class SettingsTab(QWidget):
         reminder_layout.addLayout(form)
         root.addWidget(reminder_group)
 
-        calibration_group = QGroupBox("头占比校准")
+        calibration_group = QGroupBox("坐姿校准")
         calibration_group.setObjectName("UiCard")
-        calibration_form = QFormLayout(calibration_group)
-        calibration_form.setContentsMargins(24, 18, 24, 18)
-        calibration_form.setHorizontalSpacing(16)
+        calibration_layout = QVBoxLayout(calibration_group)
+        calibration_layout.setContentsMargins(24, 18, 24, 18)
+        calibration_layout.setSpacing(14)
 
-        self.calibration_progress_label = QLabel("当前进度: 0/2")
+        calibration_desc = QLabel(
+            "校准流程：先拍 3 张正确坐姿，再拍 2 张错误坐姿（如低头/前倾），"
+            "系统会用两者的中间值作为检测阈值。"
+        )
+        calibration_desc.setObjectName("SectionHint")
+        calibration_desc.setWordWrap(True)
+        calibration_layout.addWidget(calibration_desc)
+
+        self.calibration_progress_label = QLabel("正确坐姿: 0/3　错误坐姿: 0/2")
+        self.calibration_progress_label.setObjectName("FieldLabel")
+        calibration_layout.addWidget(self.calibration_progress_label)
+
         self.calibration_threshold_label = QLabel("当前阈值: 未校准")
-        self.calibration_status_label = QLabel("状态: 等待开始")
+        self.calibration_threshold_label.setObjectName("FieldLabel")
+        self.calibration_threshold_label.setWordWrap(True)
+        calibration_layout.addWidget(self.calibration_threshold_label)
 
-        calibration_form.addRow("校准进度", self.calibration_progress_label)
-        calibration_form.addRow("阈值", self.calibration_threshold_label)
-        calibration_form.addRow("状态", self.calibration_status_label)
+        self.calibration_status_label = QLabel("状态: 等待开始")
+        self.calibration_status_label.setObjectName("SectionHint")
+        self.calibration_status_label.setWordWrap(True)
+        calibration_layout.addWidget(self.calibration_status_label)
 
         calibration_buttons = QHBoxLayout()
-        capture_button = QPushButton("拍摄正确姿势样本")
-        capture_button.setObjectName("ActionButton")
+        calibration_buttons.setSpacing(10)
+        self._capture_correct_btn = QPushButton("拍摄正确姿势样本")
+        self._capture_correct_btn.setObjectName("ActionButton")
+        self._capture_incorrect_btn = QPushButton("拍摄错误姿势样本")
+        self._capture_incorrect_btn.setObjectName("ActionButton")
+        self._capture_incorrect_btn.setEnabled(False)
         reset_button = QPushButton("重置校准")
         reset_button.setObjectName("ActionButton")
-        capture_button.clicked.connect(self.calibration_capture_requested.emit)
+        self._capture_correct_btn.clicked.connect(self.calibration_capture_requested.emit)
+        self._capture_incorrect_btn.clicked.connect(self.calibration_incorrect_capture_requested.emit)
         reset_button.clicked.connect(self.calibration_reset_requested.emit)
-        calibration_buttons.addWidget(capture_button)
+        calibration_buttons.addWidget(self._capture_correct_btn)
+        calibration_buttons.addWidget(self._capture_incorrect_btn)
         calibration_buttons.addWidget(reset_button)
         calibration_buttons.addStretch(1)
-        calibration_form.addRow(calibration_buttons)
+        calibration_layout.addLayout(calibration_buttons)
         root.addWidget(calibration_group)
 
         footer_buttons = QHBoxLayout()
@@ -229,26 +250,58 @@ class SettingsTab(QWidget):
         self._set_compute_device(getattr(settings, "compute_device", "cpu"))
         self._loading = False
 
+        head_fwd = getattr(settings, "head_forward_threshold_calibrated", 0.0)
         if settings.head_ratio_threshold > 0:
-            self.calibration_threshold_label.setText(f"当前阈值: {settings.head_ratio_threshold:.4f}")
+            text = f"头占比阈值: {settings.head_ratio_threshold:.4f}"
+            if head_fwd > 0:
+                text += f"　｜　头前倾阈值: {head_fwd:.4f}"
+            self.calibration_threshold_label.setText(text)
         else:
             self.calibration_threshold_label.setText("当前阈值: 未校准")
 
     def update_calibration_status(self, payload: dict[str, object]) -> None:
-        captured = int(payload.get("captured", 0))
-        required = int(payload.get("required", 2))
+        phase = str(payload.get("phase", ""))
+        captured_correct = int(payload.get("captured_correct", payload.get("captured", 0)))
+        required_correct = int(payload.get("required_correct", payload.get("required", 3)))
+        captured_incorrect = int(payload.get("captured_incorrect", 0))
+        required_incorrect = int(payload.get("required_incorrect", 2))
         threshold = payload.get("threshold")
         message = str(payload.get("message", ""))
 
-        self.calibration_progress_label.setText(f"当前进度: {captured}/{required}")
+        self.calibration_progress_label.setText(
+            f"正确坐姿: {captured_correct}/{required_correct}　"
+            f"错误坐姿: {captured_incorrect}/{required_incorrect}"
+        )
 
+        head_fwd_threshold = payload.get("head_forward_threshold")
         if isinstance(threshold, (int, float)) and threshold > 0:
-            self.calibration_threshold_label.setText(f"当前阈值: {float(threshold):.4f}")
+            text = f"头占比阈值: {float(threshold):.4f}"
+            if isinstance(head_fwd_threshold, (int, float)) and head_fwd_threshold > 0:
+                text += f"　｜　头前倾阈值: {float(head_fwd_threshold):.4f}"
+            self.calibration_threshold_label.setText(text)
         else:
             self.calibration_threshold_label.setText("当前阈值: 未校准")
 
         if message:
             self.calibration_status_label.setText(f"状态: {message}")
+
+        # Button state management based on calibration phase.
+        if phase == "correct_done" or phase == "collecting_incorrect":
+            # Phase 1 done, enable incorrect capture, disable correct capture.
+            self._capture_correct_btn.setEnabled(False)
+            self._capture_incorrect_btn.setEnabled(True)
+        elif phase == "completed":
+            # All done.
+            self._capture_correct_btn.setEnabled(True)
+            self._capture_incorrect_btn.setEnabled(False)
+        elif phase in ("required", "error") and captured_correct >= required_correct:
+            # Error during incorrect capture, keep incorrect button active.
+            self._capture_correct_btn.setEnabled(False)
+            self._capture_incorrect_btn.setEnabled(True)
+        else:
+            # Default / collecting correct / error during correct / reset.
+            self._capture_correct_btn.setEnabled(True)
+            self._capture_incorrect_btn.setEnabled(False)
 
     def _emit_save(self) -> None:
         if self._loading:

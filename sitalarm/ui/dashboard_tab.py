@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -50,6 +54,7 @@ class DashboardTab(QWidget):
         self.status_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         root.addWidget(self.status_label)
 
+        # ---- Today Stats Card ----
         stats_card = QFrame()
         stats_card.setObjectName("UiCard")
         stats_layout = QVBoxLayout(stats_card)
@@ -68,27 +73,94 @@ class DashboardTab(QWidget):
         stats_layout.addLayout(row)
         root.addWidget(stats_card)
 
-        event_card = QFrame()
-        event_card.setObjectName("UiCard")
-        event_layout = QVBoxLayout(event_card)
-        event_layout.setContentsMargins(24, 20, 24, 20)
-        event_layout.setSpacing(10)
+        # ---- Latest Detection Card ----
+        detection_card = QFrame()
+        detection_card.setObjectName("UiCard")
+        det_layout = QVBoxLayout(detection_card)
+        det_layout.setContentsMargins(24, 20, 24, 20)
+        det_layout.setSpacing(12)
 
-        self.last_event_label = QLabel("最近检测: --:--:-- | - | -")
-        self.last_event_label.setObjectName("LastEventLabel")
-        event_layout.addWidget(self.last_event_label)
+        det_title = QLabel("最近检测")
+        det_title.setObjectName("SectionTitle")
+        det_layout.addWidget(det_title)
 
+        # Two-column layout: image on left, metrics on right
+        det_body = QHBoxLayout()
+        det_body.setSpacing(16)
+
+        # Image thumbnail
+        self.capture_image_label = QLabel("暂无图片")
+        self.capture_image_label.setObjectName("CapturePreview")
+        self.capture_image_label.setAlignment(Qt.AlignCenter)
+        self.capture_image_label.setFixedSize(160, 120)
+        self.capture_image_label.setStyleSheet(
+            "background: rgba(241, 245, 249, 0.8); border: 1px solid rgba(148, 163, 184, 0.3); "
+            "border-radius: 8px; color: #94a3b8; font-size: 13px;"
+        )
+        det_body.addWidget(self.capture_image_label)
+
+        # Metrics panel
+        metrics_panel = QVBoxLayout()
+        metrics_panel.setSpacing(6)
+
+        self.last_event_label = QLabel("时间: --:--:--")
+        self.last_event_label.setObjectName("FieldLabel")
+        metrics_panel.addWidget(self.last_event_label)
+
+        # Detection metrics grid
+        metrics_grid = QGridLayout()
+        metrics_grid.setHorizontalSpacing(12)
+        metrics_grid.setVerticalSpacing(4)
+
+        self._head_ratio_label = QLabel("--")
+        self._head_ratio_threshold_label = QLabel("--")
+        self._head_forward_label = QLabel("--")
+        self._head_forward_threshold_label = QLabel("--")
+
+        for lbl in (
+            self._head_ratio_label,
+            self._head_ratio_threshold_label,
+            self._head_forward_label,
+            self._head_forward_threshold_label,
+        ):
+            lbl.setObjectName("MetricDetail")
+
+        metrics_grid.addWidget(self._make_hint("头占比:"), 0, 0)
+        metrics_grid.addWidget(self._head_ratio_label, 0, 1)
+        metrics_grid.addWidget(self._make_hint("阈值:"), 0, 2)
+        metrics_grid.addWidget(self._head_ratio_threshold_label, 0, 3)
+
+        metrics_grid.addWidget(self._make_hint("头前倾:"), 1, 0)
+        metrics_grid.addWidget(self._head_forward_label, 1, 1)
+        metrics_grid.addWidget(self._make_hint("阈值:"), 1, 2)
+        metrics_grid.addWidget(self._head_forward_threshold_label, 1, 3)
+
+        metrics_panel.addLayout(metrics_grid)
+
+        # Status badge
+        self._status_badge = QLabel("")
+        self._status_badge.setObjectName("StatusBadge")
+        self._status_badge.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        metrics_panel.addWidget(self._status_badge)
+        metrics_panel.addStretch(1)
+
+        det_body.addLayout(metrics_panel, 1)
+        det_layout.addLayout(det_body)
+
+        # Message area
         self.message_box = QTextEdit()
         self.message_box.setReadOnly(True)
         self.message_box.setObjectName("DashboardMessageBox")
         self.message_box.setFrameShape(QFrame.NoFrame)
         self.message_box.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.message_box.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.message_box.setMinimumHeight(64)
-        self.message_box.setMaximumHeight(110)
-        event_layout.addWidget(self.message_box)
-        root.addWidget(event_card)
+        self.message_box.setMinimumHeight(48)
+        self.message_box.setMaximumHeight(80)
+        det_layout.addWidget(self.message_box)
 
+        root.addWidget(detection_card)
+
+        # ---- Action Buttons ----
         button_row = QHBoxLayout()
         button_row.setSpacing(14)
         run_now_btn = QPushButton("立即检测")
@@ -107,6 +179,14 @@ class DashboardTab(QWidget):
         button_row.addWidget(resume_btn)
         root.addLayout(button_row)
         root.addStretch(1)
+
+    # ---- helpers ----
+
+    @staticmethod
+    def _make_hint(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setObjectName("SectionHint")
+        return lbl
 
     def _build_stat_item(self, accent: str, name: str, parent_layout: QHBoxLayout) -> QLabel:
         card = QFrame()
@@ -145,6 +225,8 @@ class DashboardTab(QWidget):
             return "X"
         return "?"
 
+    # ---- public API ----
+
     def set_state_text(self, text: str) -> None:
         self.status_label.setText(f"状态: {text}")
 
@@ -158,10 +240,48 @@ class DashboardTab(QWidget):
 
     def set_last_event(self, payload: dict[str, object]) -> None:
         status = str(payload.get("status", "unknown"))
-        reasons = str(payload.get("reasons", "-"))
         at = str(payload.get("time", "--:--:--"))
-        self.last_event_label.setText(f"最近检测: {at} | {status} | {reasons}")
+        self.last_event_label.setText(f"时间: {at}")
 
+        # Status badge
+        badge_map = {
+            "correct": ("坐姿正确", "#16a34a", "rgba(22,163,74,0.12)"),
+            "incorrect": ("坐姿错误", "#dc2626", "rgba(220,38,38,0.12)"),
+            "unknown": ("未检测到", "#64748b", "rgba(100,116,139,0.12)"),
+        }
+        text, color, bg = badge_map.get(status, ("--", "#64748b", "rgba(100,116,139,0.12)"))
+        self._status_badge.setText(text)
+        self._status_badge.setStyleSheet(
+            f"color: {color}; background: {bg}; font-weight: 700; font-size: 14px; "
+            f"padding: 4px 12px; border-radius: 6px;"
+        )
+
+        # Detection metrics
+        def _fmt(val: object) -> str:
+            if isinstance(val, (int, float)):
+                return f"{float(val):.4f}"
+            return "--"
+
+        self._head_ratio_label.setText(_fmt(payload.get("head_ratio")))
+        self._head_ratio_threshold_label.setText(_fmt(payload.get("threshold_head_ratio")))
+        self._head_forward_label.setText(_fmt(payload.get("head_forward_ratio")))
+        self._head_forward_threshold_label.setText(_fmt(payload.get("threshold_head_forward")))
+
+        # Capture image
+        image_path = str(payload.get("image_path", ""))
+        if image_path and Path(image_path).is_file():
+            pixmap = QPixmap(image_path)
+            if not pixmap.isNull():
+                scaled = pixmap.scaled(
+                    self.capture_image_label.size(),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+                self.capture_image_label.setPixmap(scaled)
+        else:
+            self.capture_image_label.setText("暂无图片")
+
+        # Message box
         message = str(payload.get("message", "") or "")
         self.set_current_message(message)
 

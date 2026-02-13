@@ -184,11 +184,24 @@ class MainWindow(QMainWindow):
         self.settings_tab.settings_changed.connect(self._save_settings)
         self.settings_tab.open_capture_dir_requested.connect(self._open_capture_dir)
         self.settings_tab.calibration_capture_requested.connect(self.controller.capture_head_ratio_calibration_sample)
+        self.settings_tab.calibration_incorrect_capture_requested.connect(self.controller.capture_incorrect_posture_calibration_sample)
         self.settings_tab.calibration_reset_requested.connect(self.controller.reset_head_ratio_calibration)
         self.settings_tab.preview_camera_requested.connect(self._open_debug_page)
 
         # Onboarding tab events
         self.onboarding_tab.calibration_requested.connect(self._on_onboarding_calibration)
+        self.onboarding_tab.calibration_correct_requested.connect(
+            self.controller.capture_head_ratio_calibration_sample
+        )
+        self.onboarding_tab.calibration_incorrect_requested.connect(
+            self.controller.capture_incorrect_posture_calibration_sample
+        )
+        self.onboarding_tab.remove_correct_sample_requested.connect(
+            self.controller.remove_correct_calibration_sample
+        )
+        self.onboarding_tab.remove_incorrect_sample_requested.connect(
+            self.controller.remove_incorrect_calibration_sample
+        )
         self.onboarding_tab.finish_onboarding_requested.connect(self._on_onboarding_finish)
         self.onboarding_tab.start_detection_requested.connect(self._on_onboarding_start_detection)
         self.onboarding_tab.settings_changed.connect(self._save_settings)
@@ -376,15 +389,11 @@ class MainWindow(QMainWindow):
         """处理校准状态更新"""
         # 转发校准状态到设置页面
         self.settings_tab.update_calibration_status(payload)
-        
-        # 更新引导页面的校准状态
+
+        # 转发完整 payload 到引导页面（含图片路径）
         phase = payload.get("phase", "")
-        captured = payload.get("captured", 0)
-        required = payload.get("required", 2)
-        message = payload.get("message", "")
-        
-        if phase in ("partial", "completed", "error"):
-            self.onboarding_tab.update_calibration_status(captured, required, message)
+        if phase in ("partial", "correct_done", "collecting_incorrect", "completed", "error", "required"):
+            self.onboarding_tab.update_calibration_status(payload)
 
     def _on_live_frame_for_onboarding(self, payload: dict) -> None:
         """将实时帧转发到引导页面的预览"""
@@ -395,22 +404,26 @@ class MainWindow(QMainWindow):
 
     # Onboarding handlers
     def _on_onboarding_calibration(self) -> None:
-        """引导页面请求拍摄校准照片"""
-        if not self.controller._is_calibrated():
-            self.controller.capture_head_ratio_calibration_sample()
-        else:
-            # 如果已经校准过了，提示用户是否重新校准
+        """引导页面请求拍摄校准照片（自动判断当前阶段）"""
+        if self.controller._is_calibrated():
             reply = QMessageBox.question(
                 self,
                 "重新校准",
                 "您已经完成过校准。是否要重新拍摄校准照片？",
                 QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
+                QMessageBox.No,
             )
             if reply == QMessageBox.Yes:
                 self.controller.reset_head_ratio_calibration()
-                # 重置后自动拍摄第一张
                 self.controller.capture_head_ratio_calibration_sample()
+            return
+
+        # Decide which phase we're in: correct or incorrect collection.
+        correct_done = len(self.controller._calibration_ratios) >= self.controller._required_calibration_samples
+        if correct_done:
+            self.controller.capture_incorrect_posture_calibration_sample()
+        else:
+            self.controller.capture_head_ratio_calibration_sample()
 
     def _on_onboarding_finish(self) -> None:
         """引导完成"""
