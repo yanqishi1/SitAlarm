@@ -508,7 +508,7 @@ class StatsTab(QWidget):
         pie_data = [
             ("正确", today_summary.correct_seconds),
             ("错误", today_summary.incorrect_seconds),
-            ("未知", today_summary.unknown_seconds),
+            ("未检测到用户", today_summary.unknown_seconds),
         ]
         self.pie_chart.set_data(pie_data)
 
@@ -536,7 +536,7 @@ class StatsTab(QWidget):
                 f"在屏幕前：{_format_duration(front_total)}\n"
                 f"正确：{_format_duration(correct)}\n"
                 f"错误：{_format_duration(incorrect)}\n"
-                f"未知：{_format_duration(unknown)}"
+                f"未检测到用户：{_format_duration(unknown)}"
             )
             for col, cell in enumerate(cells):
                 cell.setToolTip(tooltip)
@@ -548,7 +548,7 @@ class StatsTab(QWidget):
         for row_idx, row in enumerate(records):
             captured_at = QTableWidgetItem(str(row.get("captured_at", "-")))
             status = str(row.get("status", "unknown"))
-            status_text = {"correct": "正确", "incorrect": "错误", "unknown": "未知"}.get(status, status)
+            status_text = {"correct": "正确", "incorrect": "错误", "unknown": "未检测到用户"}.get(status, status)
             status_item = QTableWidgetItem(status_text)
             captured_at.setTextAlignment(Qt.AlignCenter)
             status_item.setTextAlignment(Qt.AlignCenter)

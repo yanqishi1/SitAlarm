@@ -35,6 +35,9 @@ class SettingsService:
                 data[key] = float(value)
             else:
                 data[key] = value
+
+        # Normalize legacy/Chinese detection-mode aliases.
+        data["detection_mode"] = self._normalize_detection_mode(data.get("detection_mode"))
         return AppSettings(**data)
 
     def update(self, **changes: object) -> AppSettings:
@@ -49,6 +52,17 @@ class SettingsService:
         for key, value in payload.items():
             self.storage.set_setting(key, str(value))
         return normalized
+
+    @staticmethod
+    def _normalize_detection_mode(value: object) -> str:
+        mode = str(value or "normal").lower().strip()
+        if mode in ("strict", "严格"):
+            return "strict"
+        if mode in ("normal", "正常"):
+            return "normal"
+        if mode in ("loose", "宽松"):
+            return "loose"
+        return "normal"
 
     def get_setting(self, key: str) -> str | None:
         """获取指定 key 的设置值"""

@@ -4,3 +4,4 @@
 .gradle
 .docs
 .venv-build-py2app
+__pycache__/

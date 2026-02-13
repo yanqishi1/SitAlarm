@@ -64,7 +64,7 @@ class DashboardTab(QWidget):
         row.setSpacing(16)
         self.correct_label = self._build_stat_item("correct", "正确", row)
         self.incorrect_label = self._build_stat_item("incorrect", "错误", row)
-        self.unknown_label = self._build_stat_item("unknown", "未知", row)
+        self.unknown_label = self._build_stat_item("unknown", "未检测到用户", row)
         stats_layout.addLayout(row)
         root.addWidget(stats_card)
 

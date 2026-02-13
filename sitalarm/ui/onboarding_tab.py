@@ -656,7 +656,7 @@ class OnboardingTab(QWidget):
                 status_text = {
                     "correct": "✅ 检测正确",
                     "incorrect": "⚠️ 检测错误",
-                    "unknown": "❓ 未识别"
+                    "unknown": "❓ 未检测到用户"
                 }.get(status, f"状态: {status}")
                 self.preview_status.setText(status_text)
                 

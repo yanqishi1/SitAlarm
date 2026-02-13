@@ -127,7 +127,7 @@ class DebugTab(QWidget):
         if status == "incorrect":
             status_text = "错误"
         elif status == "unknown":
-            status_text = "未知"
+            status_text = "未检测到用户"
 
         face_text = str(face_box) if isinstance(face_box, tuple) else "-"
 
