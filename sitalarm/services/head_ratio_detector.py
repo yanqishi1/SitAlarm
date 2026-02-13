@@ -107,6 +107,23 @@ class BlazeFaceFaceDetector:
             "gpu_init_error": self._gpu_init_error,
         }
 
+    def __del__(self):
+        """析构函数，确保人脸检测模型资源被释放"""
+        try:
+            if hasattr(self, '_solutions_detector') and self._solutions_detector is not None:
+                self._solutions_detector.close()
+            if hasattr(self, '_tasks_detector') and self._tasks_detector is not None:
+                self._tasks_detector.close()
+        except Exception:
+            pass
+        finally:
+            if hasattr(self, '_solutions_detector'):
+                self._solutions_detector = None
+            if hasattr(self, '_tasks_detector'):
+                self._tasks_detector = None
+            if hasattr(self, '_mp'):
+                self._mp = None
+
     def detect(self, frame: Any) -> list[FaceBox]:
         if self._mp is None:
             return []
@@ -648,4 +665,21 @@ class HeadRatioPostureDetector:
         return math.sqrt((ax - bx) ** 2 + (ay - by) ** 2 + (az - bz) ** 2)
 
 
-
+    def __del__(self):
+        """析构函数，确保 MediaPipe 模型资源被释放"""
+        try:
+            if hasattr(self, '_pose') and self._pose is not None:
+                self._pose.close()
+            if hasattr(self, '_pose_tasks') and self._pose_tasks is not None:
+                self._pose_tasks.close()
+        except Exception:
+            pass
+        finally:
+            if hasattr(self, '_pose'):
+                self._pose = None
+            if hasattr(self, '_pose_tasks'):
+                self._pose_tasks = None
+            if hasattr(self, '_mp'):
+                self._mp = None
+            if hasattr(self, '_cv2'):
+                self._cv2 = None

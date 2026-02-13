@@ -698,17 +698,36 @@ class OnboardingTab(QWidget):
             frame_height, frame_width = shape[0], shape[1]
             if frame_height <= 0 or frame_width <= 0:
                 return
+
+            # 创建 QImage，需要确保数据在 QImage 使用期间有效
+            # 关键：先复制 frame 数据，再传给 QImage
             if len(shape) >= 3 and shape[2] >= 3:
-                rgb = frame[:, :, :3][:, :, ::-1].copy()
-                image = QImage(rgb.data, frame_width, frame_height, 3 * frame_width, QImage.Format_RGB888)
+                # BGR 转 RGB (OpenCV 使用 BGR 格式，Qt 需要 RGB)
+                # 先深拷贝 frame 的数据，避免 view 问题
+                rgb_data = frame[:, :, :3][:, :, ::-1].copy()
+                # 现在可以从 rgb_data 创建 QImage，因为 rgb_data 拥有独立的数据
+                image = QImage(rgb_data.data, frame_width, frame_height, 3 * frame_width, QImage.Format_RGB888)
+                # 清理临时数据
+                del rgb_data
             else:
-                gray = frame.copy()
-                image = QImage(gray.data, frame_width, frame_height, frame_width, QImage.Format_Grayscale8)
+                # 灰度图
+                gray_data = frame.copy()
+                image = QImage(gray_data.data, frame_width, frame_height, frame_width, QImage.Format_Grayscale8)
+                del gray_data
+
+            if image.isNull():
+                return
+
             pixmap = QPixmap.fromImage(image)
             if pixmap.isNull():
                 return
-            scaled = pixmap.scaled(self.preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.preview_label.setPixmap(scaled)
+
+            # 设置缩放后的 pixmap 到预览标签
+            target_size = self.preview_label.size()
+            if not target_size.isEmpty():
+                scaled = pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.FastTransformation)
+                self.preview_label.setPixmap(scaled)
+
             if status:
                 status_text = {
                     "correct": "✅ 检测正确",
@@ -716,6 +735,7 @@ class OnboardingTab(QWidget):
                     "unknown": "❓ 未检测到用户",
                 }.get(status, f"状态: {status}")
                 self.preview_status.setText(status_text)
+
         except Exception:
             pass
 
@@ -757,3 +777,18 @@ class OnboardingTab(QWidget):
 
     def _on_finish_clicked(self) -> None:
         self.finish_onboarding_requested.emit()
+
+    def cleanup(self):
+        """清理资源，释放 pixmap 占用的内存"""
+        try:
+            self.preview_label.clear()
+            self.preview_label.setPixmap(QPixmap())
+        except Exception:
+            pass
+
+    def __del__(self):
+        """析构函数，确保资源被释放"""
+        try:
+            self.cleanup()
+        except Exception:
+            pass

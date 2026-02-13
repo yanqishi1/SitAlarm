@@ -22,7 +22,6 @@ class DebugTab(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
-        self._last_pixmap: QPixmap | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -167,7 +166,6 @@ class DebugTab(QWidget):
                 self._set_scaled_pixmap(pixmap)
                 return
 
-        self._last_pixmap = None
         self.preview_label.setPixmap(QPixmap())
         self.preview_label.setText("暂无调试画面")
 
@@ -180,48 +178,58 @@ class DebugTab(QWidget):
         if frame_height <= 0 or frame_width <= 0:
             return
 
-        if len(shape) >= 3 and shape[2] >= 3:
-            rgb = frame[:, :, :3][:, :, ::-1].copy()
-            image = QImage(rgb.data, frame_width, frame_height, 3 * frame_width, QImage.Format_RGB888).copy()
-        else:
-            gray = frame.copy()
-            image = QImage(gray.data, frame_width, frame_height, frame_width, QImage.Format_Grayscale8).copy()
+        try:
+            # 创建 QImage，需要确保数据在 QImage 使用期间有效
+            # 关键：先复制 frame 数据，再传给 QImage
+            if len(shape) >= 3 and shape[2] >= 3:
+                # BGR 转 RGB (OpenCV 使用 BGR 格式，Qt 需要 RGB)
+                # 先深拷贝 frame 的数据，避免 view 问题
+                rgb_data = frame[:, :, :3][:, :, ::-1].copy()
+                # 现在可以从 rgb_data 创建 QImage，因为 rgb_data 拥有独立的数据
+                image = QImage(rgb_data.data, frame_width, frame_height, 3 * frame_width, QImage.Format_RGB888)
+                # 清理临时数据
+                del rgb_data
+            else:
+                # 灰度图
+                gray_data = frame.copy()
+                image = QImage(gray_data.data, frame_width, frame_height, frame_width, QImage.Format_Grayscale8)
+                del gray_data
 
-        pixmap = QPixmap.fromImage(image)
-        if pixmap.isNull():
-            return
+            if image.isNull():
+                return
 
-        if isinstance(face_box, tuple) and len(face_box) == 4:
-            color = self._status_color(status)
-            painter = QPainter(pixmap)
-            painter.setRenderHint(QPainter.Antialiasing)
-            painter.setPen(QPen(color, 3))
-            x, y, w, h = [int(value) for value in face_box]
-            painter.drawRect(x, y, w, h)
-            painter.end()
+            pixmap = QPixmap.fromImage(image)
+            if pixmap.isNull():
+                return
 
-        self._set_scaled_pixmap(pixmap)
+            if isinstance(face_box, tuple) and len(face_box) == 4:
+                color = self._status_color(status)
+                # 使用 with 语句自动管理 QPainter 生命周期
+                with QPainter(pixmap) as painter:
+                    painter.setRenderHint(QPainter.Antialiasing)
+                    painter.setPen(QPen(color, 3))
+                    x, y, w, h = [int(value) for value in face_box]
+                    painter.drawRect(x, y, w, h)
+
+            # 设置缩放后的 pixmap 到预览标签
+            target_size = self.preview_label.size()
+            if not target_size.isEmpty():
+                scaled = pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.FastTransformation)
+                self.preview_label.setPixmap(scaled)
+
+        except Exception as e:
+            # 记录异常以便调试
+            import sys
+            import traceback
+            traceback.print_exc()
+            pass
 
     def _set_scaled_pixmap(self, pixmap: QPixmap) -> None:
-        self._last_pixmap = pixmap
-        # 使用固定尺寸缩放，避免布局变化导致的动态缩放
-        if self._last_pixmap is not None and not self._last_pixmap.isNull():
-            scaled = self._last_pixmap.scaled(
-                self.preview_label.size(),
-                Qt.KeepAspectRatio,
-                Qt.FastTransformation,  # 使用快速变换减少闪烁
-            )
-            self.preview_label.setPixmap(scaled)
-
-    def _refresh_preview(self) -> None:
-        """刷新预览画面（保持固定尺寸避免动态缩放）"""
-        if self._last_pixmap is None or self._last_pixmap.isNull():
+        target_size = self.preview_label.size()
+        if target_size.isEmpty():
             return
-        scaled = self._last_pixmap.scaled(
-            self.preview_label.size(),
-            Qt.KeepAspectRatio,
-            Qt.FastTransformation,  # 使用快速变换减少闪烁
-        )
+        # 直接缩放并显示，不保留中间副本
+        scaled = pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.FastTransformation)
         self.preview_label.setPixmap(scaled)
 
     @staticmethod
@@ -231,3 +239,18 @@ class DebugTab(QWidget):
         if status == "correct":
             return QColor("#ff8a00")
         return QColor("#9ca3af")
+
+    def cleanup(self):
+        """清理资源，释放 pixmap 占用的内存"""
+        try:
+            self.preview_label.clear()
+            self.preview_label.setPixmap(QPixmap())
+        except Exception:
+            pass
+
+    def __del__(self):
+        """析构函数，确保资源被释放"""
+        try:
+            self.cleanup()
+        except Exception:
+            pass

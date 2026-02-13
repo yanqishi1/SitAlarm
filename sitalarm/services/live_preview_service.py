@@ -85,8 +85,12 @@ class LivePreviewService:
         if self._camera is None:
             return
 
-        self._camera.release()
-        self._camera = None
+        try:
+            self._camera.release()
+        except Exception:
+            pass
+        finally:
+            self._camera = None
 
     def _resolve_camera_backend(self) -> Any:
         if self._camera_backend is not None:
@@ -140,3 +144,13 @@ class LivePreviewService:
         if status == "correct":
             return (0, 138, 255)
         return (156, 163, 175)
+
+    def __del__(self):
+        """析构函数，确保摄像头资源被释放"""
+        try:
+            if self._camera is not None:
+                self._camera.release()
+        except Exception:
+            pass
+        finally:
+            self._camera = None

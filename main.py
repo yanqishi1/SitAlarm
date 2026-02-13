@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from PyQt5.QtCore import QTimer
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QApplication
 
@@ -42,6 +43,8 @@ def main() -> int:
 
     # Prevent app from quitting when last window is closed (for tray mode)
     app.setQuitOnLastWindowClosed(False)
+    # 允许在退出时关闭应用
+    app.setQuitLockEnabled(False)
 
     app.setStyleSheet(build_glass_theme())
 
@@ -53,6 +56,30 @@ def main() -> int:
 
     window = MainWindow(controller)
     window.show()
+
+    # 确保应用退出时正确清理资源
+    def cleanup_resources():
+        """清理所有资源并退出应用"""
+        # 停止控制器
+        controller.stop()
+        # 停止实时预览
+        controller.stop_live_debug()
+        # 隐藏窗口
+        window.hide()
+        # 清理托盘图标
+        if hasattr(window, 'tray_icon'):
+            window.tray_icon.hide()
+        # 清理提醒弹窗
+        if hasattr(window, '_reminder_toast'):
+            window._reminder_toast.hide()
+        # 清理屏幕变暗覆盖
+        if hasattr(window, '_screen_dimmer'):
+            window._screen_dimmer.hide()
+
+        # 延迟调用 QApplication.quit()，确保所有事件处理完成
+        QTimer.singleShot(100, QApplication.quit)
+
+    app.aboutToQuit.connect(cleanup_resources)
     return app.exec_()
 
 

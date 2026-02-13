@@ -117,6 +117,12 @@ class SitAlarmController(QObject):
         self._timer.stop()
         self.stop_live_debug()
         self.state_changed.emit("已停止")
+        # 触发垃圾回收，释放 numpy 数组内存
+        try:
+            import gc
+            gc.collect()
+        except Exception:
+            pass
 
     def pause_detection(self) -> None:
         self._log.info("Pause detection.")
@@ -153,7 +159,18 @@ class SitAlarmController(QObject):
         if self._live_preview_service.started:
             self._log.info("Stop live preview.")
         self._live_preview_timer.stop()
-        self._live_preview_service.stop()
+        try:
+            self._live_preview_service.stop()
+        except Exception:
+            pass
+        # 清理缓存的帧
+        self._last_live_frame = None
+        # 触发垃圾回收，释放 numpy 数组内存
+        try:
+            import gc
+            gc.collect()
+        except Exception:
+            pass
 
     def update_settings(self, **changes: object) -> AppSettings:
         self._log.info("Update settings: %s", changes)
@@ -592,6 +609,10 @@ class SitAlarmController(QObject):
             "debug_info": debug_info,
         }
         self.live_debug_frame_updated.emit(payload)
+
+        # 优化：在发送完成后清理本地引用（但要保留 payload 引用的数据直到 Qt 处理完）
+        # 注意：不能立即 del raw_frame, frame, preview_frame，因为 payload 中引用了 preview_frame
+        # Qt 会自动管理这些对象的引用计数，所以不需要手动清理
 
     def _prepare_frame_for_detection(self, frame: object) -> tuple[object, dict[str, object]]:
         return self.capture_service.normalize_frame_brightness(frame)

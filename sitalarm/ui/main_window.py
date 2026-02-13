@@ -369,6 +369,14 @@ class MainWindow(QMainWindow):
     def _on_nav_changed(self, index: int) -> None:
         if index < 0 or index >= self.pages.count():
             return
+        # 在切换前清理当前页面的资源
+        try:
+            current_widget = self.pages.currentWidget()
+            if hasattr(current_widget, 'cleanup'):
+                current_widget.cleanup()
+        except Exception:
+            pass
+
         self.pages.setCurrentIndex(index)
         current = self.pages.currentWidget()
         # 在调试页或引导页（步骤2预览时）启动实时预览
@@ -451,18 +459,97 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if self._allow_close:
+            # 清理所有信号连接
+            self._cleanup_signals()
             event.accept()
             return
 
+        # 最小化到托盘
         event.ignore()
         self.controller.stop_live_debug()
         self.hide()
         self.tray_icon.showMessage("SitAlarm", "已最小化到托盘，仍在后台检测。", QSystemTrayIcon.Information, 3000)
 
     def _quit(self) -> None:
+        """退出应用"""
+        # 停止控制器
         self.controller.stop()
+        # 停止实时预览
+        self.controller.stop_live_debug()
+        # 隐藏UI组件
         self._reminder_toast.hide()
         self._screen_dimmer.hide()
         self.tray_icon.hide()
+        # 允许关闭窗口
         self._allow_close = True
         self.close()
+
+    def _cleanup_signals(self) -> None:
+        """清理所有信号连接，避免循环引用导致的内存泄露"""
+        try:
+            # 断开 controller 信号
+            if hasattr(self.controller, 'state_changed'):
+                self.controller.state_changed.disconnect()
+            if hasattr(self.controller, 'summary_updated'):
+                self.controller.summary_updated.disconnect()
+            if hasattr(self.controller, 'history_updated'):
+                self.controller.history_updated.disconnect()
+            if hasattr(self.controller, 'posture_records_updated'):
+                self.controller.posture_records_updated.disconnect()
+            if hasattr(self.controller, 'event_logged'):
+                self.controller.event_logged.disconnect()
+            if hasattr(self.controller, 'reminder_triggered'):
+                self.controller.reminder_triggered.disconnect()
+            if hasattr(self.controller, 'error_occurred'):
+                self.controller.error_occurred.disconnect()
+            if hasattr(self.controller, 'debug_info_updated'):
+                self.controller.debug_info_updated.disconnect()
+            if hasattr(self.controller, 'live_debug_frame_updated'):
+                self.controller.live_debug_frame_updated.disconnect()
+            if hasattr(self.controller, 'calibration_required'):
+                self.controller.calibration_required.disconnect()
+            if hasattr(self.controller, 'calibration_status_updated'):
+                self.controller.calibration_status_updated.disconnect()
+
+            # 断开侧边栏导航信号
+            self.side_nav.currentRowChanged.disconnect()
+
+            # 断开页面信号
+            if hasattr(self.dashboard_tab, 'run_now_requested'):
+                self.dashboard_tab.run_now_requested.disconnect()
+            if hasattr(self.dashboard_tab, 'pause_requested'):
+                self.dashboard_tab.pause_requested.disconnect()
+            if hasattr(self.dashboard_tab, 'resume_requested'):
+                self.dashboard_tab.resume_requested.disconnect()
+            if hasattr(self.debug_tab, 'debug_capture_requested'):
+                self.debug_tab.debug_capture_requested.disconnect()
+            if hasattr(self.settings_tab, 'settings_changed'):
+                self.settings_tab.settings_changed.disconnect()
+            if hasattr(self.settings_tab, 'open_capture_dir_requested'):
+                self.settings_tab.open_capture_dir_requested.disconnect()
+            if hasattr(self.settings_tab, 'calibration_capture_requested'):
+                self.settings_tab.calibration_capture_requested.disconnect()
+            if hasattr(self.settings_tab, 'calibration_incorrect_capture_requested'):
+                self.settings_tab.calibration_incorrect_capture_requested.disconnect()
+            if hasattr(self.settings_tab, 'calibration_reset_requested'):
+                self.settings_tab.calibration_reset_requested.disconnect()
+            if hasattr(self.settings_tab, 'preview_camera_requested'):
+                self.settings_tab.preview_camera_requested.disconnect()
+            if hasattr(self.onboarding_tab, 'calibration_requested'):
+                self.onboarding_tab.calibration_requested.disconnect()
+            if hasattr(self.onboarding_tab, 'calibration_correct_requested'):
+                self.onboarding_tab.calibration_correct_requested.disconnect()
+            if hasattr(self.onboarding_tab, 'calibration_incorrect_requested'):
+                self.onboarding_tab.calibration_incorrect_requested.disconnect()
+            if hasattr(self.onboarding_tab, 'remove_correct_sample_requested'):
+                self.onboarding_tab.remove_correct_sample_requested.disconnect()
+            if hasattr(self.onboarding_tab, 'remove_incorrect_sample_requested'):
+                self.onboarding_tab.remove_incorrect_sample_requested.disconnect()
+            if hasattr(self.onboarding_tab, 'finish_onboarding_requested'):
+                self.onboarding_tab.finish_onboarding_requested.disconnect()
+            if hasattr(self.onboarding_tab, 'start_detection_requested'):
+                self.onboarding_tab.start_detection_requested.disconnect()
+            if hasattr(self.onboarding_tab, 'settings_changed'):
+                self.onboarding_tab.settings_changed.disconnect()
+        except Exception:
+            pass

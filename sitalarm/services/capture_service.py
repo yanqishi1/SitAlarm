@@ -281,6 +281,19 @@ class CameraCaptureService:
                 pass
         return available
 
+    def __del__(self):
+        """析构函数，确保摄像头和缓存资源被释放"""
+        try:
+            if hasattr(self, '_camera') and self._camera is not None:
+                self._camera.release()
+        except Exception:
+            pass
+        finally:
+            if hasattr(self, '_camera'):
+                self._camera = None
+            if hasattr(self, '_camera_backend'):
+                self._camera_backend = None
+
     def _iter_numeric(self, obj: Any) -> Iterable[float]:
         if isinstance(obj, (int, float)):
             yield float(obj)
